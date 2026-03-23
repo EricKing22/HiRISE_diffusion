@@ -1,4 +1,4 @@
-from hirise_diffusion.config import TrainConfig
+from config import TrainConfig
 
 
 def main() -> None:
