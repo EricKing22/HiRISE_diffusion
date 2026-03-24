@@ -14,7 +14,8 @@ venv/
 .ruff_cache/
 
 # Data/artifacts
-data/
+*.csv
+*.npy
 outputs/
 checkpoints/
 wandb/

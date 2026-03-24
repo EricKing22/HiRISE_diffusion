@@ -35,10 +35,13 @@ class HiRISEDataset(Dataset):
         data_record (pd.DataFrame): Data record containing the paths to the images.
         transform (callable, optional): Optional transform to be applied on a sample.
     """
-    def __init__(self, data_record, transform=None, meta_cols=None, scale_pix=False, norm_mode="scene_robust", global_center=None, global_scale=None, pix_min=None, pix_max=None, meta_scaler=None):
+    def __init__(self, data_record, data_root=None, transform=None, meta_cols=None, scale_pix=False, norm_mode="scene_robust", global_center=None, global_scale=None, pix_min=None, pix_max=None, meta_scaler=None):
         self.transform = transform              # Image transformations
         self.data_record = data_record          # Data record
         self.meta_cols = meta_cols              # Meta values (list of column names)
+        # data_root is prepended to every row['Path'] from the CSV.
+        # Falls back to <cwd>/data to preserve the original behaviour.
+        self.data_root = data_root if data_root else os.path.join(os.getcwd(), "data")
         self.unique_sets = sorted(self.data_record['Set'].unique())
         self.scale_pix = scale_pix              # Whether to scale BG&IR to RED mean
         self.norm_mode = norm_mode  # "scene_robust" | "global_robust" | None
@@ -76,12 +79,11 @@ class HiRISEDataset(Dataset):
 
         # Confirm every path in dr exists
         invalid_obs = []
-        root = os.getcwd()
 
         for idx, row in self.data_record.iterrows():
-            path = os.path.join(root, "data", row['Path'])
-            if root[0] == "D" or root[0] == "d":  # Windows path fix
-                path = path.replace("/","\\")
+            path = os.path.join(self.data_root, row['Path'])
+            if self.data_root[0] in ("D", "d"):  # Windows path fix
+                path = path.replace("/", "\\")
             if not os.path.isfile(path):
                 observation = row['Observation']
                 invalid_obs.append(observation)
@@ -103,7 +105,7 @@ class HiRISEDataset(Dataset):
 
         # ------ LOAD IMAGES ------
         def load(rel_path: str):
-            return np.load(os.path.join(os.getcwd(), 'data', rel_path))
+            return np.load(os.path.join(self.data_root, rel_path))
 
         try:
             band_imgs = [load(df.at[ccd, 'Path']) for ccd in self.band_ccds]
@@ -209,7 +211,7 @@ class HiRISEDataset(Dataset):
 
 
 class FilteredHiRISEDataset(HiRISEDataset):
-    def __init__(self, data_record, sweep, transform=None, allowed_sets=None, meta_cols=None, norm_mode="scene_robust", global_center=None, global_scale=None, pix_min=None, pix_max=None, meta_scaler=None):
+    def __init__(self, data_record, sweep, data_root=None, transform=None, allowed_sets=None, meta_cols=None, norm_mode="scene_robust", global_center=None, global_scale=None, pix_min=None, pix_max=None, meta_scaler=None):
         # Filter data record to only include allowed sets
         if allowed_sets is not None:
             set_orig = data_record['Set'].nunique()
@@ -225,7 +227,68 @@ class FilteredHiRISEDataset(HiRISEDataset):
                 print()
 
         # Call the parent constructor with updated data record
-        super().__init__(data_record, transform, meta_cols, pix_min=pix_min, pix_max=pix_max, meta_scaler=meta_scaler, norm_mode=norm_mode, global_center=global_center, global_scale=global_scale)
+        super().__init__(data_record, data_root=data_root, transform=transform, meta_cols=meta_cols, pix_min=pix_min, pix_max=pix_max, meta_scaler=meta_scaler, norm_mode=norm_mode, global_center=global_center, global_scale=global_scale)
+
+
+class DiffusionDataset(FilteredHiRISEDataset):
+    """
+    Dataset for CM-Diff-style bidirectional diffusion training.
+
+    Each sample exposes two modalities for BDT:
+        ir   : IR10 band  (1, H, W)  — near-infrared
+        red  : RED4 band  (1, H, W)  — panchromatic target
+
+    Spatial neighbours (RED3, RED5) are kept as prior context for SCI
+    inference (statistical / histogram constraints) but are NOT fed into
+    the UNet during training.
+
+    Returned keys
+    -------------
+    ir          : (1, H, W)  IR10, normalised
+    red         : (1, H, W)  RED4, normalised
+    prior       : (2, H', W')  RED3 + RED5, same normalisation — SCI prior
+    norm_stats  : (2,)       [center, scale] used for this scene
+    obs_id      : str
+    set_name    : int
+    date        : str
+    """
+
+    def __getitem__(self, idx):
+        raw = super().__getitem__(idx)
+
+        # x_band = (2, H, W): [IR10, BG12]
+        # x_neigh = (6, H, W): [R5_BG, R5_IR, R5_RE, R3_BG, R3_IR, R3_RE]
+        # y = (1, H, W): RED4
+
+        ir  = raw['x_band'][[0]]        # (1, H, W)  IR10 only, drop BG12
+        red = raw['y']                  # (1, H, W)  RED4
+
+        # RED5_IR = channel 1,  RED3_IR = channel 4  (same band as IR10)
+        red5 = raw['x_neigh'][[1]]      # (1, H, W)
+        red3 = raw['x_neigh'][[4]]      # (1, H, W)
+        prior = torch.cat([red5, red3], dim=0)   # (2, H, W)
+
+        return dict(
+            ir=ir,
+            red=red,
+            prior=prior,
+            norm_stats=raw['stats'],
+            obs_id=raw['obs_id'],
+            set_name=raw['set_name'],
+            date=raw['date'],
+        )
+
+
+def diffusion_collate_fn(batch):
+    return dict(
+        ir        =torch.stack([b['ir']         for b in batch]),   # (B, 1, H, W)
+        red       =torch.stack([b['red']        for b in batch]),   # (B, 1, H, W)
+        prior     =torch.stack([b['prior']      for b in batch]),   # (B, 2, H, W)
+        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 2)
+        obs_id    =[b['obs_id']   for b in batch],
+        set_name  =[b['set_name'] for b in batch],
+        date      =[b['date']     for b in batch],
+    )
 
 
 def collate_fn(batch):

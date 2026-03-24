@@ -15,6 +15,16 @@ class ModelConfig(BaseModel):
     beta_end:       float = 1e-2   # β_T = 0.01  (CM-Diff uses 0.01, not 0.02)
 
 
+class DataConfig(BaseModel):
+    # ── Dataset paths ─────────────────────────────────────────────────────────
+    # data_root is the directory that contains the paths stored in the CSV
+    # (i.e. the prefix prepended to every row['Path'] value).
+    # Default: <project_root>/data   — matches the original layout.
+    # Change this if you move the files/ folder elsewhere.
+    data_root:   str  = ""           # empty = resolved at runtime to <project_root>/data
+    csv_path:    str  = ""           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
+
+
 class TrainConfig(BaseModel):
     # ── Data ──────────────────────────────────────────────────────────────────
     image_size:  int = 256

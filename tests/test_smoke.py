@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from config import ModelConfig, TrainConfig, InferenceConfig
-from models.unet import (
+from models.cm_diff_unet import (
     UNet,
     SinusoidalTimeEmbedding,
     DirectionEmbedding,
