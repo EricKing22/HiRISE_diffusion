@@ -33,7 +33,7 @@ class TrainConfig(BaseModel):
     # ── Optimiser (AdamW, paper Table 7) ─────────────────────────────────────
     lr:          float = 1e-4
     lr_decay:    float = 0.9   # multiplicative decay factor
-    lr_decay_every: int = 2000 # decay every N steps
+    lr_decay_every: int = 5000 # decay every N steps
     total_steps: int = 100_000
 
     # ── Loss weights (paper Eq. 5 / Table 7) ─────────────────────────────────
@@ -41,14 +41,16 @@ class TrainConfig(BaseModel):
     lambda_red_to_ir:  float = 1.0   # Direction B: RED4 → IR10
 
     # ── Checkpoint & logging ──────────────────────────────────────────────────
-    save_every:  int = 5_000   # save checkpoint every N steps
-    log_every:   int = 100
+    save_every:  int  = 5_000   # save checkpoint every N steps
+    log_every:   int  = 500
+    val_every:   int  = 1000    # run validation every N steps
+    resume:      bool = False   # True = auto-resume from latest.pt if it exists
 
 
 class InferenceConfig(BaseModel):
     # ── SCI constraint weights (paper Table 8, optimal λ = 20) ───────────────
-    lambda_scl:  float = 20.0  # Statistical Constraint Loss weight
-    lambda_ccl:  float = 20.0  # Channel Constraint Loss weight
+    lambda_scl:  float = 0.0   # Statistical Constraint Loss weight (0 = disabled)
+    lambda_ccl:  float = 0.0   # Channel Constraint Loss weight (0 = disabled)
 
     # ── Histogram bins for L_ccl soft histogram ───────────────────────────────
     hist_bins:   int   = 256

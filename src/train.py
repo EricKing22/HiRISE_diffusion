@@ -16,6 +16,7 @@ import os
 import sys
 import math
 import argparse
+import datetime
 import torch
 import torch.nn.functional as F
 import pandas as pd
@@ -191,20 +192,43 @@ def main() -> None:
     csv_path     = args.csv_path  or cfg_data.csv_path  or os.path.join(project_root, "data", "files", "data_record_bin12.csv")
     dr = pd.read_csv(csv_path)
 
-    dataset = DiffusionDataset(
-        data_record=dr,
-        data_root=data_root,
-        sweep=True,            # suppress per-set prints during training
-        allowed_sets=None,     # use all available data
+    # ── 8:2 train/val split at Observation level (fixed seed) ─────────────
+    all_obs   = sorted(dr["Observation"].unique())
+    rng       = torch.Generator().manual_seed(42)
+    perm      = torch.randperm(len(all_obs), generator=rng).tolist()
+    n_train   = int(len(all_obs) * 0.8)
+    train_obs = set(all_obs[i] for i in perm[:n_train])
+    val_obs   = set(all_obs[i] for i in perm[n_train:])
+
+    train_sets = set(dr[dr["Observation"].isin(train_obs)]["Set"].unique())
+    val_sets   = set(dr[dr["Observation"].isin(val_obs)]["Set"].unique())
+
+    train_dataset = DiffusionDataset(
+        data_record=dr, data_root=data_root, sweep=True,
+        allowed_sets=train_sets,
     )
+    val_dataset = DiffusionDataset(
+        data_record=dr, data_root=data_root, sweep=True,
+        allowed_sets=val_sets,
+    )
+
     loader = get_loader(
-        dataset,
+        train_dataset,
         batch_size=cfg_train.batch_size,
         collate_fn=diffusion_collate_fn,
         num_workers=4,
         shuffle=True,
     )
-    print(f"Dataset: {len(dataset)} sets  |  batch_size={cfg_train.batch_size}")
+    val_loader = get_loader(
+        val_dataset,
+        batch_size=cfg_train.batch_size,
+        collate_fn=diffusion_collate_fn,
+        num_workers=4,
+        shuffle=False,
+    )
+    print(f"Train: {len(train_dataset)} sets ({len(train_obs)} obs)  "
+          f"Val: {len(val_dataset)} sets ({len(val_obs)} obs)  "
+          f"batch_size={cfg_train.batch_size}")
 
     # ── W&B ───────────────────────────────────────────────────────────────
     use_wandb = not args.no_wandb
@@ -224,11 +248,17 @@ def main() -> None:
         )
 
     # ── Resume from checkpoint if available ───────────────────────────────
-    ckpt_dir  = args.ckpt_dir or os.path.join(project_root, "checkpoints")
-    start_step = 0
-    latest_ckpt = os.path.join(ckpt_dir, "latest.pt")
-    if os.path.exists(latest_ckpt):
+    run_ts   = datetime.datetime.now().strftime("%m%d_%H%M")
+    base_dir = args.ckpt_dir or os.path.join(project_root, "checkpoints")
+    ckpt_dir = os.path.join(base_dir, run_ts)
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    start_step  = 0
+    latest_ckpt = os.path.join(base_dir, "latest.pt")
+    if cfg_train.resume and os.path.exists(latest_ckpt):
         start_step = load_checkpoint(latest_ckpt, model, optimizer)
+    elif not cfg_train.resume:
+        print("  [ckpt] resume=False — starting from scratch")
 
     # ── Training loop ─────────────────────────────────────────────────────
     model.train()
@@ -280,6 +310,30 @@ def main() -> None:
             loss_accum        = 0.0
             loss_ir2red_accum = 0.0
             loss_red2ir_accum = 0.0
+
+        # ── Validation ────────────────────────────────────────────────────
+        if step % cfg_train.val_every == 0:
+            model.eval()
+            val_loss_accum = val_ir2red_accum = val_red2ir_accum = 0.0
+            with torch.no_grad():
+                for val_batch in val_loader:
+                    _, v_ir2red, v_red2ir = train_step(val_batch, model, scheduler, device, cfg_train)
+                    val_loss_accum   += cfg_train.lambda_ir_to_red * v_ir2red + cfg_train.lambda_red_to_ir * v_red2ir
+                    val_ir2red_accum += v_ir2red
+                    val_red2ir_accum += v_red2ir
+            n = len(val_loader)
+            avg_val        = val_loss_accum   / n
+            avg_val_ir2red = val_ir2red_accum / n
+            avg_val_red2ir = val_red2ir_accum / n
+            print(f"  [val] step {step:>6}  loss={avg_val:.4f}  "
+                  f"ir2red={avg_val_ir2red:.4f}  red2ir={avg_val_red2ir:.4f}")
+            if use_wandb:
+                wandb.log({
+                    "val/loss":        avg_val,
+                    "val/loss_ir2red": avg_val_ir2red,
+                    "val/loss_red2ir": avg_val_red2ir,
+                }, step=step)
+            model.train()
 
         # ── Checkpoint ────────────────────────────────────────────────────
         if step % cfg_train.save_every == 0 or step == cfg_train.total_steps:

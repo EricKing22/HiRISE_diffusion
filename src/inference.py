@@ -32,118 +32,20 @@ import argparse
 
 import numpy as np
 import torch
+from PIL import Image
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import ModelConfig, InferenceConfig
 from models.cm_diff_unet import UNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.process import sobel_edge
+from compute_prior import (
+    sci_l_scl, sci_l_ccl,
+    load_prior_stats,
+    compute_prior_from_dataset,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-
-# =============================================================================
-# SCI loss functions
-# =============================================================================
-
-def soft_histogram(
-    x:       torch.Tensor,       # any shape — treated as flat
-    bins:    int,
-    min_val: float = -1.0,
-    max_val: float =  1.0,
-) -> torch.Tensor:
-    """
-    Differentiable soft histogram via Gaussian bin assignment.
-
-    Each pixel is softly assigned to nearby bins using a Gaussian kernel
-    of width = bin_width, so the output is differentiable w.r.t. x.
-
-    Returns normalised histogram [bins] that sums to ~1.
-    """
-    x_flat      = x.reshape(-1)
-    bin_edges   = torch.linspace(min_val, max_val, bins + 1, device=x.device, dtype=x.dtype)
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-    bin_width   = (max_val - min_val) / bins
-
-    # [N, bins] soft assignment weights
-    diffs   = x_flat.unsqueeze(1) - bin_centers.unsqueeze(0)
-    weights = torch.exp(-0.5 * (diffs / bin_width) ** 2)
-    weights = weights / (weights.sum(dim=1, keepdim=True) + 1e-8)
-
-    hist = weights.sum(dim=0)                    # [bins]
-    hist = hist / (hist.sum() + 1e-8)            # normalise
-    return hist
-
-
-def sci_l_scl(
-    x_0_tilde:   torch.Tensor,   # [B, 1, H, W]
-    mu_prior:    torch.Tensor,   # scalar
-    sigma_prior: torch.Tensor,   # scalar
-) -> torch.Tensor:
-    """
-    Statistical Constraint Loss  (paper Eq. 14).
-
-    L_scl = |mu_pred - mu_prior| + |sigma_pred - sigma_prior|
-
-    Aligns first- and second-order statistics of the predicted image with
-    the empirical statistics of the target domain training set.
-    Single-channel version (no RGB loop needed for IR/RED images).
-    """
-    mu_pred    = x_0_tilde.mean()
-    sigma_pred = x_0_tilde.std()
-    return (mu_pred - mu_prior).abs() + (sigma_pred - sigma_prior).abs()
-
-
-def sci_l_ccl(
-    x_0_tilde: torch.Tensor,   # [B, 1, H, W]
-    h_prior:   torch.Tensor,   # [bins]  normalised histogram from training set
-    bins:      int,
-) -> torch.Tensor:
-    """
-    Channel Constraint Loss  (paper Eq. 13).
-
-    L_ccl = sum_i  (h_pred_i - h_prior_i)^2 / (h_pred_i + h_prior_i + eps)
-
-    Chi-squared distance between predicted-image histogram and target-domain
-    prior histogram computed from the training set.
-    Single-channel version.
-    """
-    h_pred = soft_histogram(x_0_tilde, bins)
-    eps    = 1e-6
-    return ((h_pred - h_prior) ** 2 / (h_pred + h_prior + eps)).sum()
-
-
-# =============================================================================
-# Prior statistics  (pre-computed from training set target domain)
-# =============================================================================
-
-def compute_prior_stats(
-    tensors: list,                          # list of [1,H,W] or [H,W] tensors
-    bins:    int            = 256,
-    device:  torch.device  = torch.device("cpu"),
-) -> dict:
-    """
-    Compute mu, sigma, and histogram over all pixels of the target domain.
-
-    Call once on the training split of the target modality and save with
-    save_prior_stats() so inference can load it without the dataset.
-    """
-    all_pixels = torch.cat([t.reshape(-1).to(device) for t in tensors])
-    mu    = all_pixels.mean()
-    sigma = all_pixels.std()
-    h     = soft_histogram(all_pixels, bins)
-    return {"mu": mu, "sigma": sigma, "histogram": h, "bins": torch.tensor(bins)}
-
-
-def save_prior_stats(stats: dict, path: str) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    torch.save(stats, path)
-    print(f"[prior] saved → {path}")
-
-
-def load_prior_stats(path: str, device: torch.device) -> dict:
-    data = torch.load(path, map_location=device)
-    return {k: v.to(device) for k, v in data.items()}
 
 
 # =============================================================================
@@ -211,8 +113,11 @@ def ddpm_step_sci(
             int(prior_stats["bins"].item()),
         )
 
-    grad = torch.autograd.grad(loss_cons, x_leaf)[0]   # [B,1,H,W]
-    mu_updated = mu_q + sigma_q * grad.detach()
+    if loss_cons.requires_grad:
+        grad = torch.autograd.grad(loss_cons, x_leaf)[0]   # [B,1,H,W]
+        mu_updated = mu_q + sigma_q * grad.detach()
+    else:
+        mu_updated = mu_q   # SCI disabled — no correction
 
     # ── 5. Sample x_{t-1} ─────────────────────────────────────────────────────
     if t_batch[0].item() > 0:
@@ -275,12 +180,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="CM-Diff SCI inference")
     parser.add_argument("--source",     required=True,
                         help="Source image path (.npy), normalised to [-1, 1]")
-    parser.add_argument("--direction",  type=int, required=True,
+    parser.add_argument("--direction",  type=int, required=True, choices=[0, 1],
                         help="Translation direction: 0=IR→RED, 1=RED→IR")
     parser.add_argument("--checkpoint", default="../checkpoints/latest.pt",
                         help="Path to model checkpoint (.pt)")
-    parser.add_argument("--prior",      default="../checkpoints/prior_stats.pt",
-                        help="Path to prior statistics file (.pt)")
+    parser.add_argument("--prior_dir",  default="../src/models",
+                        help="Directory containing prior_ir.pt and prior_red.pt")
+    parser.add_argument("--data_root",  default="",
+                        help="Root directory for .npy files (only needed if prior must be computed)")
+    parser.add_argument("--csv_path",   default="",
+                        help="Path to data_record CSV (only needed if prior must be computed)")
     parser.add_argument("--output",     default="../outputs/result.npy",
                         help="Output path (.npy)")
     parser.add_argument("--device",     default="cuda",
@@ -315,24 +224,45 @@ def main() -> None:
     ).to(device)
 
     # ── Prior statistics ───────────────────────────────────────────────────────
-    if not os.path.exists(args.prior):
-        raise FileNotFoundError(
-            f"Prior stats not found at '{args.prior}'.\n"
-            "Compute them from your training set with compute_prior_stats() "
-            "and save with save_prior_stats()."
+    # direction=0 (IR→RED): target domain is RED4  → prior_red.pt
+    # direction=1 (RED→IR): target domain is IR10  → prior_ir.pt
+    prior_name = "prior_red.pt" if args.direction == 0 else "prior_ir.pt"
+    prior_path = os.path.join(args.prior_dir, prior_name)
+
+    if not os.path.exists(prior_path):
+        print(f"[prior] {prior_path} not found — computing from dataset ...")
+        prior_ir, prior_red = compute_prior_from_dataset(
+            args.prior_dir, device, data_root=args.data_root, csv_path=args.csv_path
         )
-    prior_stats = load_prior_stats(args.prior, device)
-    print(f"Prior stats:  mu={prior_stats['mu'].item():.4f}  "
+        prior_stats = prior_red if args.direction == 0 else prior_ir
+    else:
+        prior_stats = load_prior_stats(prior_path, device)
+
+    print(f"[prior] mu={prior_stats['mu'].item():.4f}  "
           f"sigma={prior_stats['sigma'].item():.4f}  "
           f"bins={int(prior_stats['bins'].item())}")
 
     # ── Source image ───────────────────────────────────────────────────────────
     src_np   = np.load(args.source).astype(np.float32)
     x_source = torch.from_numpy(src_np)
+
+    # Ensure shape is [1, 1, H, W]
     if x_source.ndim == 2:
-        x_source = x_source[None, None]          # [1,1,H,W]
+        x_source = x_source[None, None]          # [H,W] → [1,1,H,W]
     elif x_source.ndim == 3:
-        x_source = x_source[None]                # [1,1,H,W]
+        x_source = x_source[None, :1]            # [C,H,W] → [1,1,H,W] (take first channel)
+    elif x_source.ndim == 4:
+        x_source = x_source[:, :1]               # [B,C,H,W] → [B,1,H,W]
+
+    # Apply scene-robust normalization to match training distribution.
+    # Training uses median/MAD normalisation per scene (dataset.py _robust_center_scale_from_inputs).
+    flat = x_source.reshape(-1)
+    center = flat.median()
+    mad    = (flat - center).abs().median()
+    scale  = (1.4826 * mad).clamp_min(1e-3)
+    x_source = (x_source - center) / scale
+    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}")
+
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
           f"range=[{x_source.min().item():.3f}, {x_source.max().item():.3f}]")
@@ -346,12 +276,29 @@ def main() -> None:
                         prior_stats, cfg_inf, device)
 
     # ── Save ───────────────────────────────────────────────────────────────────
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    out_np = result.squeeze().cpu().numpy()
-    np.save(args.output, out_np)
-    print(f"Saved → {args.output}  "
-          f"shape={out_np.shape}  "
-          f"range=[{out_np.min():.3f}, {out_np.max():.3f}]")
+    out_np = result.squeeze().cpu().numpy()           # [H, W]
+
+    # Normalise to [0, 255] for PNG output
+    lo, hi = out_np.min(), out_np.max()
+    if hi > lo:
+        img_u8 = ((out_np - lo) / (hi - lo) * 255).astype(np.uint8)
+    else:
+        img_u8 = np.zeros_like(out_np, dtype=np.uint8)
+
+    # Also save source for side-by-side comparison
+    src_np2d = x_source.squeeze().cpu().numpy()
+    src_lo, src_hi = src_np2d.min(), src_np2d.max()
+    if src_hi > src_lo:
+        src_u8 = ((src_np2d - src_lo) / (src_hi - src_lo) * 255).astype(np.uint8)
+    else:
+        src_u8 = np.zeros_like(src_np2d, dtype=np.uint8)
+
+    # Side-by-side PNG: source | predicted
+    combined = np.concatenate([src_u8, img_u8], axis=1)
+    out_path = os.path.splitext(args.output)[0] + ".png"
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    Image.fromarray(combined).save(out_path)
+    print(f"Saved → {out_path}  shape={combined.shape}  (left=source, right=predicted)")
 
 
 if __name__ == "__main__":
