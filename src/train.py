@@ -15,9 +15,11 @@ Usage:
 import os
 import sys
 import math
+import argparse
 import torch
 import torch.nn.functional as F
 import pandas as pd
+import wandb
 
 # Allow imports from src/
 sys.path.insert(0, os.path.dirname(__file__))
@@ -128,11 +130,11 @@ def train_step(
 
     # Separate losses by direction for weighted L_joint
     mask_1d   = (direction == 0)                          # [B]
-    loss_A    = loss_per_sample[mask_1d].mean()           if mask_1d.any()  else torch.tensor(0.0, device=device)
-    loss_B    = loss_per_sample[~mask_1d].mean()          if (~mask_1d).any() else torch.tensor(0.0, device=device)
+    loss_ir2red = loss_per_sample[mask_1d].mean()    if mask_1d.any()    else torch.tensor(0.0, device=device)
+    loss_red2ir = loss_per_sample[~mask_1d].mean()  if (~mask_1d).any() else torch.tensor(0.0, device=device)
 
-    l_joint = cfg_train.lambda_ir_to_red * loss_A + cfg_train.lambda_red_to_ir * loss_B
-    return l_joint
+    l_joint = cfg_train.lambda_ir_to_red * loss_ir2red + cfg_train.lambda_red_to_ir * loss_red2ir
+    return l_joint, loss_ir2red.item(), loss_red2ir.item()
 
 
 # =============================================================================
@@ -140,6 +142,15 @@ def train_step(
 # =============================================================================
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="CM-Diff BDT training")
+    parser.add_argument("--data_root",      default="",          help="Root directory for .npy files (overrides config)")
+    parser.add_argument("--csv_path",       default="",          help="Absolute path to data_record CSV (overrides config)")
+    parser.add_argument("--ckpt_dir",       default="",          help="Checkpoint output directory (overrides default <project_root>/checkpoints)")
+    parser.add_argument("--wandb_project",  default="HiRISE_diffusion", help="W&B project name")
+    parser.add_argument("--run_name",       default=None,        help="W&B run name (auto-generated if omitted)")
+    parser.add_argument("--no_wandb",       action="store_true", help="Disable W&B logging")
+    args = parser.parse_args()
+
     cfg_model = ModelConfig()
     cfg_train = TrainConfig()
     cfg_data  = DataConfig()
@@ -176,8 +187,8 @@ def main() -> None:
 
     # ── Dataset ───────────────────────────────────────────────────────────
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    data_root    = cfg_data.data_root or os.path.join(project_root, "data")
-    csv_path     = cfg_data.csv_path  or os.path.join(project_root, "data", "files", "data_record_bin12.csv")
+    data_root    = args.data_root or cfg_data.data_root or os.path.join(project_root, "data")
+    csv_path     = args.csv_path  or cfg_data.csv_path  or os.path.join(project_root, "data", "files", "data_record_bin12.csv")
     dr = pd.read_csv(csv_path)
 
     dataset = DiffusionDataset(
@@ -195,8 +206,25 @@ def main() -> None:
     )
     print(f"Dataset: {len(dataset)} sets  |  batch_size={cfg_train.batch_size}")
 
+    # ── W&B ───────────────────────────────────────────────────────────────
+    use_wandb = not args.no_wandb
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=args.run_name,
+            config={
+                **cfg_model.model_dump(),
+                **cfg_train.model_dump(),
+                "data_root": data_root,
+                "csv_path":  csv_path,
+                "n_params":  n_params,
+                "device":    str(device),
+            },
+            resume="allow",
+        )
+
     # ── Resume from checkpoint if available ───────────────────────────────
-    ckpt_dir  = os.path.join(project_root, "checkpoints")
+    ckpt_dir  = args.ckpt_dir or os.path.join(project_root, "checkpoints")
     start_step = 0
     latest_ckpt = os.path.join(ckpt_dir, "latest.pt")
     if os.path.exists(latest_ckpt):
@@ -204,9 +232,11 @@ def main() -> None:
 
     # ── Training loop ─────────────────────────────────────────────────────
     model.train()
-    step        = start_step
-    loss_accum  = 0.0
-    data_iter   = iter(loader)
+    step         = start_step
+    loss_accum       = 0.0
+    loss_ir2red_accum = 0.0
+    loss_red2ir_accum = 0.0
+    data_iter    = iter(loader)
 
     print(f"Training from step {step} to {cfg_train.total_steps} ...")
 
@@ -219,21 +249,37 @@ def main() -> None:
             batch     = next(data_iter)
 
         optimizer.zero_grad()
-        loss = train_step(batch, model, scheduler, device, cfg_train)
+        loss, loss_ir2red_val, loss_red2ir_val = train_step(batch, model, scheduler, device, cfg_train)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler_lr.step()
 
-        loss_accum += loss.item()
-        step       += 1
+        loss_accum        += loss.item()
+        loss_ir2red_accum += loss_ir2red_val
+        loss_red2ir_accum += loss_red2ir_val
+        step              += 1
 
         # ── Logging ───────────────────────────────────────────────────────
         if step % cfg_train.log_every == 0:
-            avg_loss = loss_accum / cfg_train.log_every
-            lr_now   = optimizer.param_groups[0]["lr"]
-            print(f"step {step:>6}/{cfg_train.total_steps}  loss={avg_loss:.4f}  lr={lr_now:.2e}")
-            loss_accum = 0.0
+            avg_loss        = loss_accum        / cfg_train.log_every
+            avg_loss_ir2red = loss_ir2red_accum / cfg_train.log_every
+            avg_loss_red2ir = loss_red2ir_accum / cfg_train.log_every
+            lr_now          = optimizer.param_groups[0]["lr"]
+            print(f"step {step:>6}/{cfg_train.total_steps}  "
+                  f"loss={avg_loss:.4f}  ir2red={avg_loss_ir2red:.4f}  red2ir={avg_loss_red2ir:.4f}  "
+                  f"lr={lr_now:.2e}")
+            if use_wandb:
+                wandb.log({
+                    "train/loss":        avg_loss,
+                    "train/loss_ir2red": avg_loss_ir2red,
+                    "train/loss_red2ir": avg_loss_red2ir,
+                    "train/lr":          lr_now,
+                    "train/grad_norm":   grad_norm.item(),
+                }, step=step)
+            loss_accum        = 0.0
+            loss_ir2red_accum = 0.0
+            loss_red2ir_accum = 0.0
 
         # ── Checkpoint ────────────────────────────────────────────────────
         if step % cfg_train.save_every == 0 or step == cfg_train.total_steps:
@@ -245,7 +291,11 @@ def main() -> None:
                 step, model, optimizer, loss.item(),
                 latest_ckpt,
             )
+            if use_wandb:
+                wandb.log({"checkpoint/step": step}, step=step)
 
+    if use_wandb:
+        wandb.finish()
     print("Training complete.")
 
 

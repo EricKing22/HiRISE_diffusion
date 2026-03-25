@@ -21,14 +21,14 @@ class DataConfig(BaseModel):
     # (i.e. the prefix prepended to every row['Path'] value).
     # Default: <project_root>/data   — matches the original layout.
     # Change this if you move the files/ folder elsewhere.
-    data_root:   str  = ""           # empty = resolved at runtime to <project_root>/data
-    csv_path:    str  = ""           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
+    data_root:   str  = "/scratch_root/ed425/HiRISE/"           # empty = resolved at runtime to <project_root>/data
+    csv_path:    str  = "/scratch_root/ed425/HiRISE/files/data_record_bin12.csv"           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
 
 
 class TrainConfig(BaseModel):
     # ── Data ──────────────────────────────────────────────────────────────────
     image_size:  int = 256
-    batch_size:  int = 6       # paper Table 7
+    batch_size:  int = 8       # paper Table 7
 
     # ── Optimiser (AdamW, paper Table 7) ─────────────────────────────────────
     lr:          float = 1e-4
