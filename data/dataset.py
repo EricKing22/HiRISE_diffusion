@@ -82,7 +82,7 @@ class HiRISEDataset(Dataset):
 
         for idx, row in self.data_record.iterrows():
             path = os.path.join(self.data_root, row['Path'])
-            if self.data_root[0] in ("D", "d"):  # Windows path fix
+            if os.name == "nt":  # Windows: normalise slashes
                 path = path.replace("/", "\\")
             if not os.path.isfile(path):
                 observation = row['Observation']
