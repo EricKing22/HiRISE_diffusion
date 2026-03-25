@@ -111,6 +111,8 @@ def ddpm_step_sci(
             x_leaf,
             prior_stats["histogram"],
             int(prior_stats["bins"].item()),
+            hist_min=float(prior_stats["hist_min"].item()),
+            hist_max=float(prior_stats["hist_max"].item()),
         )
 
     if loss_cons.requires_grad:

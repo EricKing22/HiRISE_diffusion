@@ -32,8 +32,8 @@ from data.dataset import DiffusionDataset
 def soft_histogram(
     x:       torch.Tensor,
     bins:    int,
-    min_val: float = -1.0,
-    max_val: float =  1.0,
+    min_val: float = -20.0,
+    max_val: float =  20.0,
 ) -> torch.Tensor:
     """
     Differentiable soft histogram via Gaussian bin assignment.
@@ -71,12 +71,15 @@ def sci_l_ccl(
     x_0_tilde: torch.Tensor,   # [B, 1, H, W]
     h_prior:   torch.Tensor,   # [bins]
     bins:      int,
+    hist_min:  float = -20.0,
+    hist_max:  float =  20.0,
 ) -> torch.Tensor:
     """
     Channel Constraint Loss (paper Eq. 13).
     Chi-squared distance between predicted-image histogram and prior histogram.
+    hist_min/hist_max must match the range used when computing h_prior.
     """
-    h_pred = soft_histogram(x_0_tilde, bins)
+    h_pred = soft_histogram(x_0_tilde, bins, min_val=hist_min, max_val=hist_max)
     eps    = 1e-6
     return ((h_pred - h_prior) ** 2 / (h_pred + h_prior + eps)).sum()
 
@@ -93,38 +96,52 @@ def compute_prior_stats(
     algorithm and incremental hard histogram — O(bins) memory regardless
     of dataset size.
     """
-    min_val, max_val = -1.0, 1.0
+    # Welford's online mean/variance + running min/max
+    count    = torch.tensor(0,    dtype=torch.float64, device=device)
+    mean     = torch.tensor(0.0,  dtype=torch.float64, device=device)
+    M2       = torch.tensor(0.0,  dtype=torch.float64, device=device)
+    data_min = torch.tensor( 1e9, dtype=torch.float64, device=device)
+    data_max = torch.tensor(-1e9, dtype=torch.float64, device=device)
 
-    # Welford's online mean/variance
-    count  = torch.tensor(0,   dtype=torch.float64, device=device)
-    mean   = torch.tensor(0.0, dtype=torch.float64, device=device)
-    M2     = torch.tensor(0.0, dtype=torch.float64, device=device)
+    all_tensors = list(tensors)   # materialise once to allow two passes
 
-    # Hard bin counts for histogram
-    bin_counts = torch.zeros(bins, dtype=torch.float64, device=device)
-
-    for t in tensors:
+    # Pass 1: compute mean, sigma, min, max
+    for t in all_tensors:
         flat = t.reshape(-1).to(device, dtype=torch.float64)
-
-        # Welford update
         n      = flat.numel()
         delta  = flat - mean
         count += n
         mean  += delta.sum() / count
         delta2 = flat - mean
         M2    += (delta * delta2).sum()
-
-        # Hard histogram accumulation
-        indices = ((flat - min_val) / (max_val - min_val) * bins).long().clamp(0, bins - 1)
-        bin_counts.scatter_add_(0, indices, torch.ones_like(flat))
+        data_min = torch.minimum(data_min, flat.min())
+        data_max = torch.maximum(data_max, flat.max())
 
     mu    = mean.float()
     sigma = (M2 / (count - 1)).sqrt().float()
 
-    # Normalise histogram
+    # Histogram range: cover actual data with 10% margin, rounded to nearest 5
+    margin   = (data_max - data_min).item() * 0.10
+    hist_min = float(torch.floor(torch.tensor((data_min.item() - margin) / 5)) * 5)
+    hist_max = float(torch.ceil( torch.tensor((data_max.item() + margin) / 5)) * 5)
+
+    # Pass 2: build histogram over actual range
+    bin_counts = torch.zeros(bins, dtype=torch.float64, device=device)
+    for t in all_tensors:
+        flat    = t.reshape(-1).to(device, dtype=torch.float64)
+        indices = ((flat - hist_min) / (hist_max - hist_min) * bins).long().clamp(0, bins - 1)
+        bin_counts.scatter_add_(0, indices, torch.ones_like(flat))
+
     h = (bin_counts / bin_counts.sum()).float()
 
-    return {"mu": mu, "sigma": sigma, "histogram": h, "bins": torch.tensor(bins)}
+    return {
+        "mu":        mu,
+        "sigma":     sigma,
+        "histogram": h,
+        "bins":      torch.tensor(bins),
+        "hist_min":  torch.tensor(hist_min),
+        "hist_max":  torch.tensor(hist_max),
+    }
 
 
 def save_prior_stats(stats: dict, path: str) -> None:
