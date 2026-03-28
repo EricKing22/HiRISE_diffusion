@@ -32,7 +32,6 @@ import argparse
 
 import numpy as np
 import torch
-from PIL import Image
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import ModelConfig, InferenceConfig
@@ -90,9 +89,10 @@ def ddpm_step_sci(
     alpha_bar_prev = scheduler.gather(scheduler.alpha_bar_prev, t_batch)
     sigma_q        = scheduler.gather(scheduler.posterior_var,  t_batch)   # β̃_t
 
-    #   mu_q = [ (1-α_t)(1-ᾱ_{t-1})·x_t  +  √ᾱ_{t-1}·β_t·x̃_0 ] / (1-ᾱ_t)
+    #   mu_q = [ √α_t·(1-ᾱ_{t-1})·x_t  +  √ᾱ_{t-1}·β_t·x̃_0 ] / (1-ᾱ_t)
+    sqrt_alpha_t = torch.sqrt(scheduler.gather(scheduler.alphas, t_batch))
     mu_q = (
-        (1.0 - scheduler.gather(scheduler.alphas, t_batch)) * (1.0 - alpha_bar_prev) * x_t.detach()
+        sqrt_alpha_t * (1.0 - alpha_bar_prev) * x_t.detach()
         + torch.sqrt(alpha_bar_prev) * beta_t * x_0_tilde.detach()
     ) / (1.0 - alpha_bar_t + 1e-8)
 
@@ -117,7 +117,7 @@ def ddpm_step_sci(
 
     if loss_cons.requires_grad:
         grad = torch.autograd.grad(loss_cons, x_leaf)[0]   # [B,1,H,W]
-        mu_updated = mu_q + sigma_q * grad.detach()
+        mu_updated = mu_q - sigma_q * grad.detach()
     else:
         mu_updated = mu_q   # SCI disabled — no correction
 
@@ -155,8 +155,23 @@ def sample(
     edge        = sobel_edge(x_source)
     direction_t = torch.full((B,), direction, dtype=torch.long, device=device)
 
-    # Start from pure Gaussian noise
-    x_t = torch.randn(B, 1, H, W, device=device)
+    # Initialise x_T from the correct marginal distribution.
+    # With beta_end=0.01, alpha_bar[T-1] ≈ 0.0063 (not negligible).
+    # Forward process: x_T = sqrt(ab_T)*x_0 + sqrt(1-ab_T)*eps → E[x_T] = sqrt(ab_T)*E[x_0].
+    # Inference must start from the same distribution; using pure N(0,1) causes
+    # a distribution mismatch that prevents the chain from recovering the DC component.
+    # We correct the mean using prior_stats["mu"] as E[x_0] estimate.
+    # Initialise x_T ≈ sqrt(ab_T)*x_source + sqrt(1-ab_T)*noise.
+    # The forward process at t=T gives x_T = sqrt(ab_T)*x_0 + sqrt(1-ab_T)*eps.
+    # Pure N(0,1) lacks the spatial mean offset sqrt(ab_T)*E[x_0], causing x_0_tilde≈0.
+    # Using x_source (which is correlated with the target) provides the correct mean offset.
+    # With beta_end=0.02, sqrt_ab_T≈0.006 so x_source contributes only 0.6% — not enough
+    # to bias the chain toward x_source statistics, but enough to seed the correct DC level.
+    t_max         = cfg_inf.timesteps - 1
+    sqrt_ab_T     = scheduler.sqrt_alpha_bar[t_max].item()
+    sqrt_one_ab_T = scheduler.sqrt_one_minus_ab[t_max].item()
+    x_t = sqrt_ab_T * x_source + sqrt_one_ab_T * torch.randn(B, 1, H, W, device=device)
+    print(f"[init] sqrt_ab_T={sqrt_ab_T:.4f}  x_source mean={x_source.mean().item():.4f}  x_T mean≈{(sqrt_ab_T*x_source.mean()).item():.4f}")
 
     for t in reversed(range(cfg_inf.timesteps)):
         t_batch = torch.full((B,), t, dtype=torch.long, device=device)
@@ -184,9 +199,9 @@ def main() -> None:
                         help="Source image path (.npy), normalised to [-1, 1]")
     parser.add_argument("--direction",  type=int, required=True, choices=[0, 1],
                         help="Translation direction: 0=IR→RED, 1=RED→IR")
-    parser.add_argument("--checkpoint", default="../checkpoints/latest.pt",
+    parser.add_argument("--checkpoint", default="src/output/latest.pt",
                         help="Path to model checkpoint (.pt)")
-    parser.add_argument("--prior_dir",  default="../src/models",
+    parser.add_argument("--prior_dir",  default="src/output",
                         help="Directory containing prior_ir.pt and prior_red.pt")
     parser.add_argument("--data_root",  default="",
                         help="Root directory for .npy files (only needed if prior must be computed)")
@@ -194,6 +209,8 @@ def main() -> None:
                         help="Path to data_record CSV (only needed if prior must be computed)")
     parser.add_argument("--output",     default="../outputs/result.npy",
                         help="Output path (.npy)")
+    parser.add_argument("--ground_truth", default="",
+                        help="Ground truth target image (.npy) for comparison (optional)")
     parser.add_argument("--device",     default="cuda",
                         help="Device: cuda or cpu")
     args = parser.parse_args()
@@ -257,13 +274,47 @@ def main() -> None:
         x_source = x_source[:, :1]               # [B,C,H,W] → [B,1,H,W]
 
     # Apply scene-robust normalization to match training distribution.
-    # Training uses median/MAD normalisation per scene (dataset.py _robust_center_scale_from_inputs).
-    flat = x_source.reshape(-1)
+    # Training (dataset.py _robust_center_scale_from_inputs) uses IR10+BG12 joint median/MAD.
+    # Try to auto-detect the companion file to replicate joint stats.
+    companion_path = None
+    src_path = args.source
+    if "_IR10.npy" in src_path:
+        companion_path = src_path.replace("_IR10.npy", "_BG12.npy")
+    elif "_RED4.npy" in src_path:
+        # RED4 was also normalised by IR+BG stats during training
+        companion_path = src_path.replace("_RED4.npy", "_IR10.npy")
+
+    if companion_path and os.path.exists(companion_path):
+        comp_np = np.load(companion_path).astype(np.float32)
+        comp_t  = torch.from_numpy(comp_np).reshape(-1)
+        flat    = torch.cat([x_source.reshape(-1), comp_t])
+        print(f"[norm] using joint IR+BG normalization (companion: {os.path.basename(companion_path)})")
+    else:
+        flat = x_source.reshape(-1)
+        print(f"[norm] companion file not found — using source-only normalization")
+
     center = flat.median()
     mad    = (flat - center).abs().median()
     scale  = (1.4826 * mad).clamp_min(1e-3)
     x_source = (x_source - center) / scale
     print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}")
+
+    # Method B: subtract IR10 normalized mean (dc) to match training distribution.
+    # direction=0: source IS IR10, dc = x_source.mean()
+    # direction=1: source is RED4, load companion IR10 (already in comp_np) for dc
+    if args.direction == 0:
+        dc = x_source.mean()
+    elif companion_path and os.path.exists(companion_path):
+        comp_ir10 = torch.from_numpy(comp_np)
+        if comp_ir10.ndim == 2:
+            comp_ir10 = comp_ir10[None, None]
+        elif comp_ir10.ndim == 3:
+            comp_ir10 = comp_ir10[None, :1]
+        dc = ((comp_ir10 - center) / scale).mean()
+    else:
+        dc = torch.tensor(0.0)
+    x_source = x_source - dc
+    print(f"[norm/dc] dc={dc.item():.4f}  source mean after={x_source.mean().item():.4f}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
@@ -277,30 +328,14 @@ def main() -> None:
         result = sample(model, scheduler, x_source, args.direction,
                         prior_stats, cfg_inf, device)
 
+    # Method B: restore DC offset
+    result = result + dc.to(device)
+
     # ── Save ───────────────────────────────────────────────────────────────────
     out_np = result.squeeze().cpu().numpy()           # [H, W]
-
-    # Normalise to [0, 255] for PNG output
-    lo, hi = out_np.min(), out_np.max()
-    if hi > lo:
-        img_u8 = ((out_np - lo) / (hi - lo) * 255).astype(np.uint8)
-    else:
-        img_u8 = np.zeros_like(out_np, dtype=np.uint8)
-
-    # Also save source for side-by-side comparison
-    src_np2d = x_source.squeeze().cpu().numpy()
-    src_lo, src_hi = src_np2d.min(), src_np2d.max()
-    if src_hi > src_lo:
-        src_u8 = ((src_np2d - src_lo) / (src_hi - src_lo) * 255).astype(np.uint8)
-    else:
-        src_u8 = np.zeros_like(src_np2d, dtype=np.uint8)
-
-    # Side-by-side PNG: source | predicted
-    combined = np.concatenate([src_u8, img_u8], axis=1)
-    out_path = os.path.splitext(args.output)[0] + ".png"
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    Image.fromarray(combined).save(out_path)
-    print(f"Saved → {out_path}  shape={combined.shape}  (left=source, right=predicted)")
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+    np.save(args.output, out_np)
+    print(f"Saved → {args.output}  shape={out_np.shape}  range=[{out_np.min():.3f}, {out_np.max():.3f}]")
 
 
 if __name__ == "__main__":

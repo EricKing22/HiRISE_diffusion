@@ -9,7 +9,7 @@ Usage:
     python src/compute_prior.py \
         --data_root /path/to/data  \
         --csv_path  /path/to/data_record_bin12.csv \
-        --prior_dir src/models/saves
+        --prior_dir src/output
 """
 
 import os

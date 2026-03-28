@@ -12,7 +12,7 @@ class ModelConfig(BaseModel):
     # ── Diffusion schedule ────────────────────────────────────────────────────
     timesteps:      int   = 1000
     beta_start:     float = 1e-4   # β₁ = 0.0001
-    beta_end:       float = 1e-2   # β_T = 0.01  (CM-Diff uses 0.01, not 0.02)
+    beta_end:       float = 2e-2   # β_T = 0.02  (standard DDPM; 0.01 is too small for non-zero-mean scene-robust normalisation)
 
 
 class DataConfig(BaseModel):

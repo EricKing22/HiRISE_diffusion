@@ -35,7 +35,7 @@ echo -e "Job started on $(date)\n"
 PROJECT_ROOT=/scratch_root/ed425/HiRISE/HiRISE_diffusion
 DATA_ROOT=/scratch_root/ed425/HiRISE/
 CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
-CKPT_DIR=/scratch_root/ed425/HiRISE_diffusion/src/models/
+CKPT_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
 
 mkdir -p /scratch_root/ed425/HiRISE_diffusion/scripts/logs
 mkdir -p $CKPT_DIR

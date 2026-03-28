@@ -249,7 +249,7 @@ def main() -> None:
 
     # ── Resume from checkpoint if available ───────────────────────────────
     run_ts   = datetime.datetime.now().strftime("%m%d_%H%M")
-    base_dir = args.ckpt_dir or os.path.join(project_root, "checkpoints")
+    base_dir = args.ckpt_dir or os.path.join(os.path.dirname(__file__), "output")
     ckpt_dir = os.path.join(base_dir, run_ts)
     os.makedirs(ckpt_dir, exist_ok=True)
 
