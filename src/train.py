@@ -33,6 +33,7 @@ from diffusion.process import q_sample, sobel_edge
 # Add project root for data imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
+from eval import evaluate, get_val_split
 
 
 # =============================================================================
@@ -193,15 +194,9 @@ def main() -> None:
     dr = pd.read_csv(csv_path)
 
     # ── 8:2 train/val split at Observation level (fixed seed) ─────────────
-    all_obs   = sorted(dr["Observation"].unique())
-    rng       = torch.Generator().manual_seed(42)
-    perm      = torch.randperm(len(all_obs), generator=rng).tolist()
-    n_train   = int(len(all_obs) * 0.8)
-    train_obs = set(all_obs[i] for i in perm[:n_train])
-    val_obs   = set(all_obs[i] for i in perm[n_train:])
-
-    train_sets = set(dr[dr["Observation"].isin(train_obs)]["Set"].unique())
-    val_sets   = set(dr[dr["Observation"].isin(val_obs)]["Set"].unique())
+    train_sets, val_sets = get_val_split(dr)
+    train_obs = dr[dr["Set"].isin(train_sets)]["Observation"].unique()
+    val_obs   = dr[dr["Set"].isin(val_sets)]["Observation"].unique()
 
     train_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
@@ -313,25 +308,14 @@ def main() -> None:
 
         # ── Validation ────────────────────────────────────────────────────
         if step % cfg_train.val_every == 0:
-            model.eval()
-            val_loss_accum = val_ir2red_accum = val_red2ir_accum = 0.0
-            with torch.no_grad():
-                for val_batch in val_loader:
-                    _, v_ir2red, v_red2ir = train_step(val_batch, model, scheduler, device, cfg_train)
-                    val_loss_accum   += cfg_train.lambda_ir_to_red * v_ir2red + cfg_train.lambda_red_to_ir * v_red2ir
-                    val_ir2red_accum += v_ir2red
-                    val_red2ir_accum += v_red2ir
-            n = len(val_loader)
-            avg_val        = val_loss_accum   / n
-            avg_val_ir2red = val_ir2red_accum / n
-            avg_val_red2ir = val_red2ir_accum / n
-            print(f"  [val] step {step:>6}  loss={avg_val:.4f}  "
-                  f"ir2red={avg_val_ir2red:.4f}  red2ir={avg_val_red2ir:.4f}")
+            val_results = evaluate(model, scheduler, val_loader, device)
+            print(f"  [val] step {step:>6}  loss={val_results['loss']:.4f}  "
+                  f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")
             if use_wandb:
                 wandb.log({
-                    "val/loss":        avg_val,
-                    "val/loss_ir2red": avg_val_ir2red,
-                    "val/loss_red2ir": avg_val_red2ir,
+                    "val/loss":        val_results["loss"],
+                    "val/loss_ir2red": val_results["loss_ir2red"],
+                    "val/loss_red2ir": val_results["loss_red2ir"],
                 }, step=step)
             model.train()
 
