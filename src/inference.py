@@ -9,7 +9,7 @@ Algorithm per denoising step:
   3. Compute L_cons = lambda_scl * L_scl(x_0_tilde) + lambda_ccl * L_ccl(x_0_tilde)
   4. Compute gradient g = d(L_cons) / d(x_0_tilde)
   5. Compute posterior mean mu_q from DDPM posterior
-  6. Correct:  mu_updated = mu_q + sigma_q * g
+  6. Correct:  mu_updated = mu_q - sigma_q * g
   7. Sample x_{t-1} ~ N(mu_updated, sigma_q)    [t=0: no noise, return mu]
 
 Direction labels:
@@ -143,6 +143,7 @@ def sample(
     prior_stats: dict,
     cfg_inf:     InferenceConfig,
     device:      torch.device,
+    verbose:     bool = True,
 ) -> torch.Tensor:
     """
     Full T-step reverse diffusion with SCI.
@@ -155,23 +156,22 @@ def sample(
     edge        = sobel_edge(x_source)
     direction_t = torch.full((B,), direction, dtype=torch.long, device=device)
 
-    # Initialise x_T from the correct marginal distribution.
-    # With beta_end=0.01, alpha_bar[T-1] ≈ 0.0063 (not negligible).
-    # Forward process: x_T = sqrt(ab_T)*x_0 + sqrt(1-ab_T)*eps → E[x_T] = sqrt(ab_T)*E[x_0].
-    # Inference must start from the same distribution; using pure N(0,1) causes
-    # a distribution mismatch that prevents the chain from recovering the DC component.
-    # We correct the mean using prior_stats["mu"] as E[x_0] estimate.
-    # Initialise x_T ≈ sqrt(ab_T)*x_source + sqrt(1-ab_T)*noise.
-    # The forward process at t=T gives x_T = sqrt(ab_T)*x_0 + sqrt(1-ab_T)*eps.
-    # Pure N(0,1) lacks the spatial mean offset sqrt(ab_T)*E[x_0], causing x_0_tilde≈0.
-    # Using x_source (which is correlated with the target) provides the correct mean offset.
-    # With beta_end=0.02, sqrt_ab_T≈0.006 so x_source contributes only 0.6% — not enough
-    # to bias the chain toward x_source statistics, but enough to seed the correct DC level.
+    # Initialise x_T to match the training forward-process marginal at t=T:
+    #   x_T = sqrt(ᾱ_T) * x_target + sqrt(1-ᾱ_T) * ε
+    # The target is unknown at inference time, so we approximate E[x_target]
+    # with prior_stats["mu"] (the target-domain mean computed from training data).
+    #
+    # IMPORTANT: must NOT use x_source here.  x_source belongs to the SOURCE
+    # domain (e.g. RED4 for direction 1) whose mean differs from the target.
+    # Seeding x_T with x_source injects a DC bias of sqrt(ᾱ_T)*(μ_source−μ_target),
+    # which the first x̃₀ computation amplifies by 1/sqrt(ᾱ_T) ≈ 167×.
     t_max         = cfg_inf.timesteps - 1
     sqrt_ab_T     = scheduler.sqrt_alpha_bar[t_max].item()
     sqrt_one_ab_T = scheduler.sqrt_one_minus_ab[t_max].item()
-    x_t = sqrt_ab_T * x_source + sqrt_one_ab_T * torch.randn(B, 1, H, W, device=device)
-    print(f"[init] sqrt_ab_T={sqrt_ab_T:.4f}  x_source mean={x_source.mean().item():.4f}  x_T mean≈{(sqrt_ab_T*x_source.mean()).item():.4f}")
+    mu_target     = prior_stats["mu"].item()
+    x_t = sqrt_ab_T * mu_target + sqrt_one_ab_T * torch.randn(B, 1, H, W, device=device)
+    if verbose:
+        print(f"[init] sqrt_ab_T={sqrt_ab_T:.4f}  mu_target={mu_target:.4f}  x_T mean≈{x_t.mean().item():.4f}")
 
     for t in reversed(range(cfg_inf.timesteps)):
         t_batch = torch.full((B,), t, dtype=torch.long, device=device)
@@ -183,7 +183,7 @@ def sample(
                 direction_t, t_batch, prior_stats, cfg_inf,
             )
 
-        if t % 100 == 0:
+        if verbose and t % 100 == 0:
             print(f"  t={t:4d}  x range=[{x_t.min().item():.3f}, {x_t.max().item():.3f}]")
 
     return x_t
@@ -274,24 +274,27 @@ def main() -> None:
         x_source = x_source[:, :1]               # [B,C,H,W] → [B,1,H,W]
 
     # Apply scene-robust normalization to match training distribution.
-    # Training (dataset.py _robust_center_scale_from_inputs) uses IR10+BG12 joint median/MAD.
-    # Try to auto-detect the companion file to replicate joint stats.
-    companion_path = None
+    # Training (_robust_center_scale_from_inputs) always uses IR10+BG12 joint pixels.
+    # Derive both paths from source regardless of direction.
     src_path = args.source
     if "_IR10.npy" in src_path:
-        companion_path = src_path.replace("_IR10.npy", "_BG12.npy")
+        ir10_path = src_path
+        bg12_path = src_path.replace("_IR10.npy", "_BG12.npy")
     elif "_RED4.npy" in src_path:
-        # RED4 was also normalised by IR+BG stats during training
-        companion_path = src_path.replace("_RED4.npy", "_IR10.npy")
+        ir10_path = src_path.replace("_RED4.npy", "_IR10.npy")
+        bg12_path = src_path.replace("_RED4.npy", "_BG12.npy")
+    else:
+        ir10_path = bg12_path = None
 
-    if companion_path and os.path.exists(companion_path):
-        comp_np = np.load(companion_path).astype(np.float32)
-        comp_t  = torch.from_numpy(comp_np).reshape(-1)
-        flat    = torch.cat([x_source.reshape(-1), comp_t])
-        print(f"[norm] using joint IR+BG normalization (companion: {os.path.basename(companion_path)})")
+    ir10_np = np.load(ir10_path).astype(np.float32) if ir10_path and os.path.exists(ir10_path) else None
+    bg12_np = np.load(bg12_path).astype(np.float32) if bg12_path and os.path.exists(bg12_path) else None
+
+    if ir10_np is not None and bg12_np is not None:
+        flat = torch.cat([torch.from_numpy(ir10_np).reshape(-1), torch.from_numpy(bg12_np).reshape(-1)])
+        print(f"[norm] joint IR10+BG12 normalization")
     else:
         flat = x_source.reshape(-1)
-        print(f"[norm] companion file not found — using source-only normalization")
+        print(f"[norm] IR10/BG12 not found — source-only normalization")
 
     center = flat.median()
     mad    = (flat - center).abs().median()
@@ -299,18 +302,14 @@ def main() -> None:
     x_source = (x_source - center) / scale
     print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}")
 
-    # Method B: subtract IR10 normalized mean (dc) to match training distribution.
-    # direction=0: source IS IR10, dc = x_source.mean()
-    # direction=1: source is RED4, load companion IR10 (already in comp_np) for dc
+    # Method B: dc = IR10 normalized mean; subtract from source before model, add back after.
     if args.direction == 0:
-        dc = x_source.mean()
-    elif companion_path and os.path.exists(companion_path):
-        comp_ir10 = torch.from_numpy(comp_np)
-        if comp_ir10.ndim == 2:
-            comp_ir10 = comp_ir10[None, None]
-        elif comp_ir10.ndim == 3:
-            comp_ir10 = comp_ir10[None, :1]
-        dc = ((comp_ir10 - center) / scale).mean()
+        dc = x_source.mean()                      # source IS IR10
+    elif ir10_np is not None:
+        ir10_t = torch.from_numpy(ir10_np)
+        if ir10_t.ndim == 2:   ir10_t = ir10_t[None, None]
+        elif ir10_t.ndim == 3: ir10_t = ir10_t[None, :1]
+        dc = ((ir10_t - center) / scale).mean()   # normalize IR10, take mean
     else:
         dc = torch.tensor(0.0)
     x_source = x_source - dc
