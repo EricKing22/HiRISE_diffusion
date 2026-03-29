@@ -245,15 +245,17 @@ class DiffusionDataset(torch.utils.data.Dataset):
     """
     Standalone dataset for CM-Diff bidirectional diffusion training.
 
-    Normalisation: per-channel min-max → [-1, 1]
-      - IR10 normalised by its own (min, max)
-      - RED4 normalised by its own (min, max)
+    Normalisation: shared per-scene robust scaling using IR10 statistics.
+      center = median(IR10),  scale = 1.4826 × MAD(IR10)
+      Both IR10 and RED4 are normalised by the same (center, scale), so the
+      model receives the spectral offset between modalities as a learnable signal
+      rather than having it destroyed by independent per-channel normalisation.
 
     Returned keys
     -------------
-    ir         : (1, H, W)  IR10, normalised to [-1, 1]
-    red        : (1, H, W)  RED4, normalised to [-1, 1]
-    norm_stats : (4,)       [ir_min, ir_max, red_min, red_max]
+    ir         : (1, H, W)  IR10, normalised
+    red        : (1, H, W)  RED4, normalised with IR10 stats
+    norm_stats : (2,)       [center, scale]  — for denormalisation
     obs_id     : str
     set_name   : int
     date       : str
@@ -286,15 +288,21 @@ class DiffusionDataset(torch.utils.data.Dataset):
         ir  = load(df.at['IR10', 'Path']).unsqueeze(0)   # (1, H, W)
         red = load(df.at['RED4', 'Path']).unsqueeze(0)   # (1, H, W)
 
-        # Per-channel min-max → [-1, 1]
-        eps = 1e-6
-        ir_min,  ir_max  = ir.min(),  ir.max()
-        red_min, red_max = red.min(), red.max()
+        # Shared per-scene normalisation using IR10 robust statistics.
+        # The same (center, scale) is applied to both channels so that the
+        # spectral relationship (RED4 − IR10 offset) is preserved for the model.
+        # clamp_min(0.05): prevents near-zero MAD (low-contrast patches) from
+        #   producing extreme normalized values (e.g. scale=1e-3 → ±500).
+        # clamp(-10, 10): hard cap on residual outliers after the scale floor.
+        flat   = ir.reshape(-1)
+        center = flat.median()
+        mad    = (flat - center).abs().median()
+        scale  = (1.4826 * mad).clamp_min(0.05)
 
-        ir_norm  = 2 * (ir  - ir_min)  / (ir_max  - ir_min  + eps) - 1
-        red_norm = 2 * (red - red_min) / (red_max - red_min + eps) - 1
+        ir_norm  = ((ir  - center) / scale).clamp(-10, 10)
+        red_norm = ((red - center) / scale).clamp(-10, 10)
 
-        norm_stats = torch.stack([ir_min, ir_max, red_min, red_max])  # (4,)
+        norm_stats = torch.stack([center, scale])   # (2,)
 
         return dict(
             ir=ir_norm,
@@ -310,7 +318,7 @@ def diffusion_collate_fn(batch):
     return dict(
         ir        =torch.stack([b['ir']         for b in batch]),   # (B, 1, H, W)
         red       =torch.stack([b['red']        for b in batch]),   # (B, 1, H, W)
-        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 4)
+        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 2)
         obs_id    =[b['obs_id']   for b in batch],
         set_name  =[b['set_name'] for b in batch],
         date      =[b['date']     for b in batch],

@@ -273,47 +273,30 @@ def main() -> None:
     elif x_source.ndim == 4:
         x_source = x_source[:, :1]               # [B,C,H,W] → [B,1,H,W]
 
-    # Apply scene-robust normalization to match training distribution.
-    # Training (_robust_center_scale_from_inputs) always uses IR10+BG12 joint pixels.
-    # Derive both paths from source regardless of direction.
+    # Shared per-scene normalisation using IR10 statistics — matches DiffusionDataset.
+    # For direction=0 (source=IR10): compute stats directly from source.
+    # For direction=1 (source=RED4): load companion IR10 to get the same stats.
     src_path = args.source
     if "_IR10.npy" in src_path:
         ir10_path = src_path
-        bg12_path = src_path.replace("_IR10.npy", "_BG12.npy")
     elif "_RED4.npy" in src_path:
         ir10_path = src_path.replace("_RED4.npy", "_IR10.npy")
-        bg12_path = src_path.replace("_RED4.npy", "_BG12.npy")
     else:
-        ir10_path = bg12_path = None
+        ir10_path = None
 
-    ir10_np = np.load(ir10_path).astype(np.float32) if ir10_path and os.path.exists(ir10_path) else None
-    bg12_np = np.load(bg12_path).astype(np.float32) if bg12_path and os.path.exists(bg12_path) else None
-
-    if ir10_np is not None and bg12_np is not None:
-        flat = torch.cat([torch.from_numpy(ir10_np).reshape(-1), torch.from_numpy(bg12_np).reshape(-1)])
-        print(f"[norm] joint IR10+BG12 normalization")
+    if ir10_path and os.path.exists(ir10_path):
+        ir10_t = torch.from_numpy(np.load(ir10_path).astype(np.float32))
+        flat   = ir10_t.reshape(-1)
+        print(f"[norm] IR10 stats from {os.path.basename(ir10_path)}")
     else:
         flat = x_source.reshape(-1)
-        print(f"[norm] IR10/BG12 not found — source-only normalization")
+        print(f"[norm] IR10 companion not found — using source-only stats")
 
     center = flat.median()
     mad    = (flat - center).abs().median()
-    scale  = (1.4826 * mad).clamp_min(1e-3)
-    x_source = (x_source - center) / scale
+    scale  = (1.4826 * mad).clamp_min(0.05)
+    x_source = ((x_source - center) / scale).clamp(-10, 10)
     print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}")
-
-    # Method B: dc = IR10 normalized mean; subtract from source before model, add back after.
-    if args.direction == 0:
-        dc = x_source.mean()                      # source IS IR10
-    elif ir10_np is not None:
-        ir10_t = torch.from_numpy(ir10_np)
-        if ir10_t.ndim == 2:   ir10_t = ir10_t[None, None]
-        elif ir10_t.ndim == 3: ir10_t = ir10_t[None, :1]
-        dc = ((ir10_t - center) / scale).mean()   # normalize IR10, take mean
-    else:
-        dc = torch.tensor(0.0)
-    x_source = x_source - dc
-    print(f"[norm/dc] dc={dc.item():.4f}  source mean after={x_source.mean().item():.4f}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
@@ -326,9 +309,6 @@ def main() -> None:
     with torch.no_grad():
         result = sample(model, scheduler, x_source, args.direction,
                         prior_stats, cfg_inf, device)
-
-    # Method B: restore DC offset
-    result = result + dc.to(device)
 
     # ── Save ───────────────────────────────────────────────────────────────────
     out_np = result.squeeze().cpu().numpy()           # [H, W]
