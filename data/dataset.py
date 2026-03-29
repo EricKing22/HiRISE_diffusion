@@ -241,52 +241,68 @@ class FilteredHiRISEDataset(HiRISEDataset):
         super().__init__(data_record, data_root=data_root, transform=transform, meta_cols=meta_cols, pix_min=pix_min, pix_max=pix_max, meta_scaler=meta_scaler, norm_mode=norm_mode, global_center=global_center, global_scale=global_scale)
 
 
-class DiffusionDataset(FilteredHiRISEDataset):
+class DiffusionDataset(torch.utils.data.Dataset):
     """
-    Dataset for CM-Diff-style bidirectional diffusion training.
+    Standalone dataset for CM-Diff bidirectional diffusion training.
 
-    Each sample exposes two modalities for BDT:
-        ir   : IR10 band  (1, H, W)  — near-infrared
-        red  : RED4 band  (1, H, W)  — panchromatic target
-
-    Spatial neighbours (RED3, RED5) are kept as prior context for SCI
-    inference (statistical / histogram constraints) but are NOT fed into
-    the UNet during training.
+    Normalisation: per-channel min-max → [-1, 1]
+      - IR10 normalised by its own (min, max)
+      - RED4 normalised by its own (min, max)
 
     Returned keys
     -------------
-    ir          : (1, H, W)  IR10, normalised
-    red         : (1, H, W)  RED4, normalised
-    prior       : (2, H', W')  RED3 + RED5, same normalisation — SCI prior
-    norm_stats  : (3,)       [center, scale, dc] used for this scene
-    obs_id      : str
-    set_name    : int
-    date        : str
+    ir         : (1, H, W)  IR10, normalised to [-1, 1]
+    red        : (1, H, W)  RED4, normalised to [-1, 1]
+    norm_stats : (4,)       [ir_min, ir_max, red_min, red_max]
+    obs_id     : str
+    set_name   : int
+    date       : str
     """
 
+    def __init__(self, data_record, data_root=None, sweep=True, allowed_sets=None):
+        if allowed_sets is not None:
+            data_record = data_record[data_record['Set'].isin(allowed_sets)]
+        if data_record.empty:
+            raise ValueError("No data found for the specified allowed_sets")
+        self.data_record = data_record.reset_index(drop=True)
+        self.data_root   = data_root or os.path.join(os.getcwd(), "data")
+        self.unique_sets = sorted(data_record['Set'].unique())
+        if not sweep:
+            print(f"DiffusionDataset: {len(self.unique_sets)} sets  "
+                  f"({data_record['Observation'].nunique()} observations)")
+
+    def __len__(self):
+        return len(self.unique_sets)
+
     def __getitem__(self, idx):
-        raw = super().__getitem__(idx)
+        set_idx = self.unique_sets[idx]
+        df = self.data_record[self.data_record['Set'] == set_idx].set_index('CCD')
 
-        # x_band = (2, H, W): [IR10, BG12]
-        # x_neigh = (6, H, W): [R5_BG, R5_IR, R5_RE, R3_BG, R3_IR, R3_RE]
-        # y = (1, H, W): RED4
+        def load(rel_path):
+            return torch.from_numpy(
+                np.load(os.path.join(self.data_root, rel_path)).astype(np.float32)
+            )
 
-        ir  = raw['x_band'][[0]]        # (1, H, W)  IR10 only, drop BG12
-        red = raw['y']                  # (1, H, W)  RED4
+        ir  = load(df.at['IR10', 'Path']).unsqueeze(0)   # (1, H, W)
+        red = load(df.at['RED4', 'Path']).unsqueeze(0)   # (1, H, W)
 
-        # RED5_IR = channel 1,  RED3_IR = channel 4  (same band as IR10)
-        red5 = raw['x_neigh'][[1]]      # (1, H, W)
-        red3 = raw['x_neigh'][[4]]      # (1, H, W)
-        prior = torch.cat([red5, red3], dim=0)   # (2, H, W)
+        # Per-channel min-max → [-1, 1]
+        eps = 1e-6
+        ir_min,  ir_max  = ir.min(),  ir.max()
+        red_min, red_max = red.min(), red.max()
+
+        ir_norm  = 2 * (ir  - ir_min)  / (ir_max  - ir_min  + eps) - 1
+        red_norm = 2 * (red - red_min) / (red_max - red_min + eps) - 1
+
+        norm_stats = torch.stack([ir_min, ir_max, red_min, red_max])  # (4,)
 
         return dict(
-            ir=ir,
-            red=red,
-            prior=prior,
-            norm_stats=raw['stats'],
-            obs_id=raw['obs_id'],
-            set_name=raw['set_name'],
-            date=raw['date'],
+            ir=ir_norm,
+            red=red_norm,
+            norm_stats=norm_stats,
+            obs_id=str(df.at['IR10', 'Observation']),
+            set_name=int(df.at['IR10', 'Set']),
+            date=str(df.at['IR10', 'Date']),
         )
 
 
@@ -294,8 +310,7 @@ def diffusion_collate_fn(batch):
     return dict(
         ir        =torch.stack([b['ir']         for b in batch]),   # (B, 1, H, W)
         red       =torch.stack([b['red']        for b in batch]),   # (B, 1, H, W)
-        prior     =torch.stack([b['prior']      for b in batch]),   # (B, 2, H, W)
-        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 3)
+        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 4)
         obs_id    =[b['obs_id']   for b in batch],
         set_name  =[b['set_name'] for b in batch],
         date      =[b['date']     for b in batch],
