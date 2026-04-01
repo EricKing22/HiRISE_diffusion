@@ -296,7 +296,12 @@ def main() -> None:
     mad    = (flat - center).abs().median()
     scale  = (1.4826 * mad).clamp_min(0.05)
     x_source = ((x_source - center) / scale).clamp(-10, 10)
-    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}")
+
+    # Method B: subtract IR10 normalized mean so scene enters UNet with IR mean≈0
+    # flat already holds the raw IR10 pixels (or source pixels as fallback)
+    dc = ((flat - center) / scale).clamp(-10, 10).mean()
+    x_source = x_source - dc
+    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  dc={dc.item():.4f}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
@@ -309,6 +314,9 @@ def main() -> None:
     with torch.no_grad():
         result = sample(model, scheduler, x_source, args.direction,
                         prior_stats, cfg_inf, device)
+
+    # ── Restore dc offset ─────────────────────────────────────────────────────
+    result = result + dc.to(device)
 
     # ── Save ───────────────────────────────────────────────────────────────────
     out_np = result.squeeze().cpu().numpy()           # [H, W]

@@ -35,7 +35,7 @@ from diffusion.process import q_sample, sobel_edge
 from compute_prior import load_prior_stats
 from inference import sample
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
-
+from skimage.metrics import structural_similarity as sk_ssim
 
 # =============================================================================
 # Noise-prediction evaluation (used by train.py)
@@ -121,18 +121,15 @@ def evaluate(
 # Per-image metric helpers
 # =============================================================================
 
-def _ssim_batch(pred: torch.Tensor, target: torch.Tensor,
-                data_range: float = 2.0, window_size: int = 11) -> torch.Tensor:
+def _ssim_single(pred: torch.Tensor, target: torch.Tensor,
+                  data_range: float, window_size: int = 11) -> float:
     """
-    Per-image SSIM over a batch [B, 1, H, W] in [-1, 1].
-    Approximates Gaussian-windowed SSIM with a uniform sliding window.
-    Returns [B] tensor.
+    SSIM for a single image pair [1, 1, H, W] with explicit data_range.
 
-    SSIM(x, y) = [l(x,y)]·[c(x,y)]·[s(x,y)]
-      l = (2μ_x μ_y + C1) / (μ_x² + μ_y² + C1)       luminance
-      c = (2σ_x σ_y + C2) / (σ_x² + σ_y² + C2)       contrast
-      s = (σ_xy + C2/2)   / (σ_x σ_y + C2/2)          structure
-    Combined: SSIM = [(2μ_xμ_y+C1)(2σ_xy+C2)] / [(μ_x²+μ_y²+C1)(σ_x²+σ_y²+C2)]
+    Uses per-image GT dynamic range so that the stabilisation constants
+    C1/C2 scale with the actual signal amplitude.  Numerical safeguards:
+      - variance clamp(min=0) against E[x²]-E[x]² float rounding
+      - +1e-8 in denominator against zero-variance flat patches
     """
     C1  = (0.01 * data_range) ** 2
     C2  = (0.03 * data_range) ** 2
@@ -141,14 +138,19 @@ def _ssim_batch(pred: torch.Tensor, target: torch.Tensor,
     mu1 = F.avg_pool2d(pred,   window_size, stride=1, padding=pad)
     mu2 = F.avg_pool2d(target, window_size, stride=1, padding=pad)
 
-    sigma1_sq = F.avg_pool2d(pred    ** 2,    window_size, stride=1, padding=pad) - mu1 ** 2
-    sigma2_sq = F.avg_pool2d(target  ** 2,    window_size, stride=1, padding=pad) - mu2 ** 2
-    sigma12   = F.avg_pool2d(pred * target,   window_size, stride=1, padding=pad) - mu1 * mu2
+    sigma1_sq = (F.avg_pool2d(pred   ** 2, window_size, stride=1, padding=pad) - mu1 ** 2).clamp(min=0)
+    sigma2_sq = (F.avg_pool2d(target ** 2, window_size, stride=1, padding=pad) - mu2 ** 2).clamp(min=0)
+    sigma12   =  F.avg_pool2d(pred * target, window_size, stride=1, padding=pad) - mu1 * mu2
 
-    ssim_map = ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / \
-               ((mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2) + 1e-8)
-    return ssim_map.mean(dim=[1, 2, 3])   # [B]
+    num = (2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)
+    den = (mu1 ** 2 + mu2 ** 2 + C1) * (sigma1_sq + sigma2_sq + C2) + 1e-8
+    return (num / den).mean().item()
 
+
+def _ssim_safe(y_true, y_pred, data_range: float):
+    """Compute SSIM for 2D arrays with explicit data_range."""
+    dr = max(float(data_range), 1e-8)
+    return float(sk_ssim(y_true, y_pred, data_range=dr))
 
 def _pearson_batch(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """
@@ -167,13 +169,13 @@ def _pearson_batch(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return r   # [B]
 
 
-def _psnr_from_mse(mse: torch.Tensor, data_range: float = 2.0) -> torch.Tensor:
+def _psnr_from_mse(mse: torch.Tensor, data_range: torch.Tensor) -> torch.Tensor:
     """
     PSNR in dB from per-image MSE tensor.
     PSNR = 10 · log10(MAX² / MSE),  where MAX = data_range (=2 for [-1,1]).
     Returns [B] tensor.
     """
-    return 10.0 * torch.log10(torch.tensor(data_range ** 2) / (mse + 1e-10))
+    return 10.0 * torch.log10(data_range ** 2 / (mse + 1e-10))
 
 
 # =============================================================================
@@ -197,17 +199,17 @@ def _inception_features(images: torch.Tensor,
                          inception: torch.nn.Module) -> np.ndarray:
     """
     Extract InceptionV3 pool3 features from single-channel images.
-    images : [B, 1, H, W] in [-1, 1]
+    images : [B, 1, H, W] in [-10, 10] (normalized space)
     Returns numpy [B, 2048].
 
     Preprocessing:
       1. Tile 1→3 channels (grayscale repeated across RGB)
       2. Resize to 299×299 (InceptionV3 input resolution)
-      3. Rescale [-1,1] → [0,1] (InceptionV3 transform_input handles normalization)
+      3. Rescale [-10,10] → [0,1] (InceptionV3 expects [0,1] input)
     """
     imgs = images.repeat(1, 3, 1, 1)
     imgs = F.interpolate(imgs, size=(299, 299), mode='bilinear', align_corners=False)
-    imgs = ((imgs + 1.0) / 2.0).clamp(0.0, 1.0)
+    imgs = ((imgs + 10.0) / 20.0).clamp(0.0, 1.0)
     return inception(imgs).cpu().numpy()   # [B, 2048]
 
 
@@ -255,17 +257,27 @@ def evaluate_images(
     """
     Image-level evaluation: full T-step reverse diffusion in batches.
 
-    Metrics computed per direction (IR→RED and RED→IR):
-      MSE      — mean squared error (pixel accuracy)
-      MAE      — mean absolute error (robust pixel accuracy)
-      PSNR     — peak signal-to-noise ratio in dB
-      SSIM     — structural similarity index (luminance + contrast + structure)
-      Pearson r — linear correlation (scale/offset invariant)
-      FID      — Fréchet Inception Distance (distributional quality, optional)
+    Metrics are computed in TWO spaces per direction (IR→RED and RED→IR):
 
-    Data range is 2.0 (images normalised to [-1, 1]).
+    [Physical] — denormalized to original DN values (x_phys = x_norm * scale + center):
+      MSE/MAE  — mean squared/absolute error in physical DN units
+      PSNR     — fixed MAX=1.0. Using per-image (max-min) range as MAX breaks PSNR
+                 when MSE > range² (produces negative values). Fixed MAX ensures
+                 interpretable and comparable values across all scenes.
+      Note: MSE/MAE are scene-dependent — a scene with scale=0.1 has 100× smaller
+        MSE_phys than a scene with scale=0.01 for the same relative error.
+
+    [Normalized] — in the model's clamp(-10, 10) operating space:
+      MSE      — comparable across scenes (MSE_phys / scale² eliminates scale variance)
+      PSNR     — fixed MAX=20 (range of clamp interval [-10, 10])
+      This space is the primary metric for cross-run / cross-λ model comparison.
+
+    [Structural] (normalized space):
+      SSIM     — structural similarity (inputs shifted to [0,1] internally)
+      Pearson r — linear correlation, invariant to affine transforms
+
+    FID (optional) — computed in physical space for InceptionV3 compatibility.
     """
-    DATA_RANGE = 2.0
 
     model.eval()
     n = len(val_dataset)
@@ -275,11 +287,17 @@ def evaluate_images(
     dataset = (torch.utils.data.Subset(val_dataset, list(range(n)))
                if n < len(val_dataset) else val_dataset)
     loader  = get_loader(dataset, batch_size=batch_size, collate_fn=diffusion_collate_fn,
-                         num_workers=0, shuffle=False)
+                         num_workers=4, shuffle=False)
 
     # Per-image metric accumulators
-    mse_0, mae_0, psnr_0, ssim_0, pearson_0 = [], [], [], [], []
-    mse_1, mae_1, psnr_1, ssim_1, pearson_1 = [], [], [], [], []
+    # Physical space (denormalized — original DN values)
+    mse_phys_0, mae_phys_0 = [], []
+    mse_phys_1, mae_phys_1 = [], []
+    # Normalized space (model's operating range — comparable across scenes)
+    mse_norm_0 = []
+    mse_norm_1 = []
+    ssim_0, ssim_0_phy, pearson_0 = [], [], []
+    ssim_1, ssim_1_phy, pearson_1 = [], [], []
 
     # FID feature accumulators
     if compute_fid:
@@ -292,9 +310,11 @@ def evaluate_images(
         torch.cuda.manual_seed(seed)
 
     n_done = 0
+
     for batch in loader:
         ir_batch  = batch["ir"].to(device)    # [B, 1, H, W]
         red_batch = batch["red"].to(device)   # [B, 1, H, W]
+        B = ir_batch.shape[0]
 
         with torch.no_grad():
             pred_red = sample(model, scheduler, ir_batch,  direction=0,
@@ -304,64 +324,119 @@ def evaluate_images(
                               prior_stats=prior_ir,  cfg_inf=cfg_inf, device=device,
                               verbose=False)
 
-        # ── pixel-level metrics ──────────────────────────────────────────────
-        mse0_b = F.mse_loss(pred_red, red_batch, reduction="none").mean(dim=[1,2,3])
-        mse1_b = F.mse_loss(pred_ir,  ir_batch,  reduction="none").mean(dim=[1,2,3])
+        # Clamp DDPM outputs to the valid training range.
+        pred_red_norm = pred_red.clamp(-10.0, 10.0)
+        pred_ir_norm  = pred_ir.clamp(-10.0, 10.0)
 
-        mae0_b = F.l1_loss(pred_red, red_batch, reduction="none").mean(dim=[1,2,3])
-        mae1_b = F.l1_loss(pred_ir,  ir_batch,  reduction="none").mean(dim=[1,2,3])
+        # ── Denormalization (physical DN space) ──────────────────────────────
+        norm_stats = batch["norm_stats"]      # [B, 3] = (center, scale, dc)
+        center = norm_stats[:, :1, None, None].to(device)   # [B, 1, 1, 1]
+        scale  = norm_stats[:, 1:2, None, None].to(device)  # [B, 1, 1, 1]
+        dc     = norm_stats[:, 2:3, None, None].to(device)  # [B, 1, 1, 1]
 
-        psnr0_b = _psnr_from_mse(mse0_b, DATA_RANGE)
-        psnr1_b = _psnr_from_mse(mse1_b, DATA_RANGE)
+        pred_red_phys = (pred_red_norm + dc) * scale + center
+        pred_ir_phys  = (pred_ir_norm  + dc) * scale + center
+        red_gt_phys   = (red_batch + dc) * scale + center
+        ir_gt_phys    = (ir_batch  + dc) * scale + center
 
-        # ── structural metrics ───────────────────────────────────────────────
+        n_done += B
+
+        # ── Physical-space pixel metrics ────────────────────────────────────
+        mse_phys0_b  = F.mse_loss(pred_red_phys, red_gt_phys, reduction="none").mean(dim=[1,2,3])
+        mse_phys1_b  = F.mse_loss(pred_ir_phys,  ir_gt_phys,  reduction="none").mean(dim=[1,2,3])
+        mae_phys0_b  = F.l1_loss( pred_red_phys, red_gt_phys, reduction="none").mean(dim=[1,2,3])
+        mae_phys1_b  = F.l1_loss( pred_ir_phys,  ir_gt_phys,  reduction="none").mean(dim=[1,2,3])
+
+        # ── Normalized-space pixel metrics ───────────────────────────────────
+        mse_norm0_b  = F.mse_loss(pred_red_norm, red_batch,  reduction="none").mean(dim=[1,2,3])
+        mse_norm1_b  = F.mse_loss(pred_ir_norm,  ir_batch,   reduction="none").mean(dim=[1,2,3])
+
+        # ── SSIM in physical / normalized spaces (explicit data_range) ─────
+        ssim0_phy_vals, ssim1_phy_vals = [], []
+        ssim0_vals, ssim1_vals = [], []
+        for i in range(B):
+            gt0_np   = red_gt_phys[i].squeeze().cpu().numpy()
+            pred0_np = pred_red_phys[i].squeeze().cpu().numpy()
+            gt1_np   = ir_gt_phys[i].squeeze().cpu().numpy()
+            pred1_np = pred_ir_phys[i].squeeze().cpu().numpy()
+            dr0_phy = max(float(np.max(gt0_np) - np.min(gt0_np)), 1e-2)
+            dr1_phy = max(float(np.max(gt1_np) - np.min(gt1_np)), 1e-2)
+            ssim0_phy_vals.append(_ssim_safe(gt0_np, pred0_np, data_range=dr0_phy))
+            ssim1_phy_vals.append(_ssim_safe(gt1_np, pred1_np, data_range=dr1_phy))
+
+            # normalized space: model range is clamp([-10, 10]) => data_range=20
+            gt0_np = red_batch[i].squeeze().cpu().numpy()
+            pred0_np = pred_red_norm[i].squeeze().cpu().numpy()
+            gt1_np = ir_batch[i].squeeze().cpu().numpy()
+            pred1_np = pred_ir_norm[i].squeeze().cpu().numpy()
+            ssim0_vals.append(_ssim_safe(gt0_np, pred0_np, data_range=20.0))
+            ssim1_vals.append(_ssim_safe(gt1_np, pred1_np, data_range=20.0))
+
+        # ── Pearson (normalized space — invariant to affine transforms) ──────
         with torch.no_grad():
-            ssim0_b    = _ssim_batch(pred_red, red_batch, DATA_RANGE)
-            ssim1_b    = _ssim_batch(pred_ir,  ir_batch,  DATA_RANGE)
-            pearson0_b = _pearson_batch(pred_red, red_batch)
-            pearson1_b = _pearson_batch(pred_ir,  ir_batch)
+            pearson0_b = _pearson_batch(pred_red_norm, red_batch)
+            pearson1_b = _pearson_batch(pred_ir_norm,  ir_batch)
 
-        mse_0.extend(mse0_b.cpu().tolist());    mse_1.extend(mse1_b.cpu().tolist())
-        mae_0.extend(mae0_b.cpu().tolist());    mae_1.extend(mae1_b.cpu().tolist())
-        psnr_0.extend(psnr0_b.cpu().tolist());  psnr_1.extend(psnr1_b.cpu().tolist())
-        ssim_0.extend(ssim0_b.cpu().tolist());  ssim_1.extend(ssim1_b.cpu().tolist())
-        pearson_0.extend(pearson0_b.cpu().tolist()); pearson_1.extend(pearson1_b.cpu().tolist())
+        # ── Accumulate ──────────────────────────────────────────────────────
+        mse_phys_0.extend(mse_phys0_b.cpu().tolist())
+        mse_phys_1.extend(mse_phys1_b.cpu().tolist())
+        mae_phys_0.extend(mae_phys0_b.cpu().tolist())
+        mae_phys_1.extend(mae_phys1_b.cpu().tolist())
+        mse_norm_0.extend(mse_norm0_b.cpu().tolist())
+        mse_norm_1.extend(mse_norm1_b.cpu().tolist())
+        ssim_0.extend(ssim0_vals)
+        ssim_1.extend(ssim1_vals)
+        ssim_0_phy.extend(ssim0_phy_vals)
+        ssim_1_phy.extend(ssim1_phy_vals)
+        pearson_0.extend(pearson0_b.cpu().tolist())
+        pearson_1.extend(pearson1_b.cpu().tolist())
 
-        # ── FID features ────────────────────────────────────────────────────
+        # ── FID features (normalized space for InceptionV3) ─────────────────
         if compute_fid:
-            real_f0.append(_inception_features(red_batch, inception))
-            fake_f0.append(_inception_features(pred_red,  inception))
-            real_f1.append(_inception_features(ir_batch,  inception))
-            fake_f1.append(_inception_features(pred_ir,   inception))
+            real_f0.append(_inception_features(red_batch,     inception))
+            fake_f0.append(_inception_features(pred_red_norm, inception))
+            real_f1.append(_inception_features(ir_batch,      inception))
+            fake_f1.append(_inception_features(pred_ir_norm,  inception))
 
-        n_done += ir_batch.shape[0]
         print(f"  [{n_done}/{n}]  "
-              f"MSE(IR→RED)={mse0_b.mean():.4f}  SSIM={ssim0_b.mean():.4f}  | "
-              f"MSE(RED→IR)={mse1_b.mean():.4f}  SSIM={ssim1_b.mean():.4f}")
+              f"MSE(IR→RED)={mse_phys0_b.mean():.4f}/{mse_norm0_b.mean():.4f}  "
+              f"SSIM phy={np.mean(ssim_0_phy):.4f} SSIM norm = {np.mean(ssim_0):.4f}  "
+              f"| "
+              f"MSE(RED→IR)={mse_phys1_b.mean():.4f}/{mse_norm1_b.mean():.4f}  "
+              f"SSIM phy={np.mean(ssim_1_phy):.4f}" f" SSIM norm = {np.mean(ssim_1):.4f}  "
+              f"| "
+        )
 
     def _avg(lst): return float(np.mean(lst))
+    def _psnr_pooled(mse_list, max_val):
+        """Global PSNR from pooled (averaged) MSE — avoids per-image inflation."""
+        avg_mse = float(np.mean(mse_list))
+        return 10.0 * math.log10(max_val ** 2 / avg_mse) if avg_mse > 0 else 0.0
 
     results = dict(
         n_samples   = n_done,
-        # IR → RED
-        mse_ir2red  = _avg(mse_0),
-        mae_ir2red  = _avg(mae_0),
-        psnr_ir2red = _avg(psnr_0),
-        ssim_ir2red = _avg(ssim_0),
+        # ── Physical-space (original DN values) ────────────────────────────
+        mse_phys_ir2red  = _avg(mse_phys_0),
+        mae_phys_ir2red  = _avg(mae_phys_0),
+        psnr_phys_ir2red = _psnr_pooled(mse_phys_0, 1.0),
+        mse_phys_red2ir  = _avg(mse_phys_1),
+        mae_phys_red2ir  = _avg(mae_phys_1),
+        psnr_phys_red2ir = _psnr_pooled(mse_phys_1, 1.0),
+        # ── Normalized-space (comparable across scenes) ─────────────────────
+        mse_norm_ir2red  = _avg(mse_norm_0),
+        psnr_norm_ir2red = _psnr_pooled(mse_norm_0, 20.0),
+        mse_norm_red2ir  = _avg(mse_norm_1),
+        psnr_norm_red2ir = _psnr_pooled(mse_norm_1, 20.0),
+        # ── Structural ─────────────────────────────────────────────────────
+    ssim_norm_ir2red = _avg(ssim_0),
+    ssim_norm_red2ir = _avg(ssim_1),
+    ssim_phys_ir2red = _avg(ssim_0_phy),
+    ssim_phys_red2ir = _avg(ssim_1_phy),
         pearson_ir2red = _avg(pearson_0),
-        # RED → IR
-        mse_red2ir  = _avg(mse_1),
-        mae_red2ir  = _avg(mae_1),
-        psnr_red2ir = _avg(psnr_1),
-        ssim_red2ir = _avg(ssim_1),
         pearson_red2ir = _avg(pearson_1),
-        # combined (average of both directions)
-        mse_combined  = (_avg(mse_0)  + _avg(mse_1))  / 2,
-        psnr_combined = (_avg(psnr_0) + _avg(psnr_1)) / 2,
-        ssim_combined = (_avg(ssim_0) + _avg(ssim_1)) / 2,
     )
 
-    if compute_fid:
+    if compute_fid and len(real_f0) > 0:
         real_0 = np.concatenate(real_f0, axis=0)
         fake_0 = np.concatenate(fake_f0, axis=0)
         real_1 = np.concatenate(real_f1, axis=0)
@@ -403,14 +478,14 @@ def main() -> None:
     parser.add_argument("--checkpoint",  default="src/output/latest.pt")
     parser.add_argument("--prior_dir",   default="src/output",
                         help="Directory containing prior_ir.pt and prior_red.pt")
-    parser.add_argument("--data_root",   default="")
-    parser.add_argument("--csv_path",    default="")
-    parser.add_argument("--max_samples", type=int, default=50,
+    parser.add_argument("--data_root",   default=r"D:\Imperial\IRP\HiRISE_diffusion\data")
+    parser.add_argument("--csv_path",    default=r"D:\Imperial\IRP\HiRISE_diffusion\data\files\data_record_bin12.csv")
+    parser.add_argument("--max_samples", type=int, default=0,
                         help="Max samples (0 = all)")
     parser.add_argument("--batch_size",  type=int, default=4)
-    parser.add_argument("--lambda_scl",  type=float, default=0.0)
-    parser.add_argument("--lambda_ccl",  type=float, default=0.0)
-    parser.add_argument("--no_fid",      action="store_true",
+    parser.add_argument("--lambda_scl",  type=float, default=70.0)
+    parser.add_argument("--lambda_ccl",  type=float, default=70.0)
+    parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster, no torchvision needed)")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--device",      default="cuda")
@@ -457,6 +532,7 @@ def main() -> None:
 
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
+    val_sets = [19645, 7292, 7293, 14774]
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
     )
@@ -473,18 +549,34 @@ def main() -> None:
     )
 
     W = 14
-    print(f"\n{'='*52}")
+    print(f"\n{'='*68}")
     print(f"{'Metric':<{W}}  {'IR→RED':>10}  {'RED→IR':>10}  {'Combined':>10}")
-    print(f"{'-'*52}")
-    print(f"{'MSE':<{W}}  {results['mse_ir2red']:>10.4f}  {results['mse_red2ir']:>10.4f}  {results['mse_combined']:>10.4f}")
-    print(f"{'MAE':<{W}}  {results['mae_ir2red']:>10.4f}  {results['mae_red2ir']:>10.4f}  {'—':>10}")
-    print(f"{'PSNR (dB)':<{W}}  {results['psnr_ir2red']:>10.2f}  {results['psnr_red2ir']:>10.2f}  {results['psnr_combined']:>10.2f}")
-    print(f"{'SSIM':<{W}}  {results['ssim_ir2red']:>10.4f}  {results['ssim_red2ir']:>10.4f}  {results['ssim_combined']:>10.4f}")
+    print(f"{'─'*68}")
+    # Physical space (denormalized — original DN values)
+    print(f"{'[Physical]':<{W}}")
+    print(f"{'  MSE':<{W}}  {results['mse_phys_ir2red']:>10.4f}  {results['mse_phys_red2ir']:>10.4f}  "
+          f"{(results['mse_phys_ir2red']+results['mse_phys_red2ir'])/2:>10.4f}")
+    print(f"{'  MAE':<{W}}  {results['mae_phys_ir2red']:>10.4f}  {results['mae_phys_red2ir']:>10.4f}  {'—':>10}")
+    print(f"{'  PSNR (dB)':<{W}}  {results['psnr_phys_ir2red']:>10.2f}  {results['psnr_phys_red2ir']:>10.2f}  "
+          f"{(results['psnr_phys_ir2red']+results['psnr_phys_red2ir'])/2:>10.2f}")
+    # Normalized space (comparable across scenes)
+    print(f"{'[Normalized]':<{W}}")
+    print(f"{'  MSE':<{W}}  {results['mse_norm_ir2red']:>10.4f}  {results['mse_norm_red2ir']:>10.4f}  "
+          f"{(results['mse_norm_ir2red']+results['mse_norm_red2ir'])/2:>10.4f}")
+    print(f"{'  PSNR (dB)':<{W}}  {results['psnr_norm_ir2red']:>10.2f}  {results['psnr_norm_red2ir']:>10.2f}  "
+          f"{(results['psnr_norm_ir2red']+results['psnr_norm_red2ir'])/2:>10.2f}")
+    # Structural
+    print(f"{'[Structural]':<{W}}")
+    print(f"{'SSIM (norm)':<{W}}  {results['ssim_norm_ir2red']:>10.4f}  {results['ssim_norm_red2ir']:>10.4f}  "
+        f"{(results['ssim_norm_ir2red']+results['ssim_norm_red2ir'])/2:>10.4f}")
+    print(f"{'SSIM (phys)':<{W}}  {results['ssim_phys_ir2red']:>10.4f}  {results['ssim_phys_red2ir']:>10.4f}  "
+        f"{(results['ssim_phys_ir2red']+results['ssim_phys_red2ir'])/2:>10.4f}")
     print(f"{'Pearson r':<{W}}  {results['pearson_ir2red']:>10.4f}  {results['pearson_red2ir']:>10.4f}  {'—':>10}")
     if "fid_ir2red" in results:
         print(f"{'FID':<{W}}  {results['fid_ir2red']:>10.2f}  {results['fid_red2ir']:>10.2f}  {'—':>10}")
-    print(f"{'='*52}")
+    print(f"{'='*68}")
     print(f"(n={results['n_samples']}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
+    print(f"  Physical PSNR:  MAX=1.0  |  Normalized PSNR:  MAX=20  |  SSIM physical space (custom, per-image GT range, floor=0.01)")
 
 
 if __name__ == "__main__":

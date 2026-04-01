@@ -10,7 +10,7 @@
 #SBATCH --gres=gpu:1
 
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=05:00:00
 
 export WANDB_API_KEY=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
 export WANDB_DIR=/scratch_root/ed425/tmp
@@ -32,7 +32,7 @@ start_time=$(date +%s)
 echo -e "Job started on $(date)\n"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-PROJECT_ROOT=/scratch_root/ed425/HiRISE/HiRISE_diffusion
+PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
 DATA_ROOT=/scratch_root/ed425/HiRISE/
 CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
 CKPT_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output

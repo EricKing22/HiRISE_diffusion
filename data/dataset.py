@@ -154,17 +154,6 @@ class HiRISEDataset(Dataset):
         neighbours = (neighbours - a) / s
         label = (label - a) / s
 
-        # Method B: subtract IR10 normalized mean (dc) so every scene enters
-        # the UNet with IR10 mean=0.  This makes the global prior mu≈0 and
-        # lets SCI work correctly with standard lambda values.
-        if self.norm_mode == "scene_robust":
-            dc = bands[0].mean()          # scalar: IR10 channel mean post-normalization
-            bands      = bands      - dc
-            neighbours = neighbours - dc
-            label      = label      - dc
-        else:
-            dc = torch.tensor(0.0, dtype=bands.dtype)
-
         x_band = bands                # (2, Hb, Wb)
         neigh = neighbours[..., :3].permute(0, 3, 1, 2)    # (2, 3, Hn, Wn) - Drop r4
         x_neigh = neigh.reshape(-1, neigh.shape[-2], neigh.shape[-1])    # (6, Hn, Wn)
@@ -181,7 +170,7 @@ class HiRISEDataset(Dataset):
             a = torch.tensor(a, dtype=bands.dtype)
         if not isinstance(s, torch.Tensor):
             s = torch.tensor(s, dtype=bands.dtype)
-        stats = torch.stack([a, s, dc])   # [center, scale, dc];  dc=0 for non-scene_robust modes
+        stats = torch.stack([a, s])   # [center, scale]
 
         chan_spec_band = ['IR10', 'BG12']
         chan_spec_neigh = [
@@ -253,9 +242,10 @@ class DiffusionDataset(torch.utils.data.Dataset):
 
     Returned keys
     -------------
-    ir         : (1, H, W)  IR10, normalised
-    red        : (1, H, W)  RED4, normalised with IR10 stats
-    norm_stats : (2,)       [center, scale]  — for denormalisation
+    ir         : (1, H, W)  IR10, normalised (mean≈0 after dc subtraction)
+    red        : (1, H, W)  RED4, normalised with IR10 stats then dc-shifted
+    norm_stats : (3,)       [center, scale, dc]  — for denormalisation:
+                            x_raw = (x_norm + dc) * scale + center
     obs_id     : str
     set_name   : int
     date       : str
@@ -281,6 +271,8 @@ class DiffusionDataset(torch.utils.data.Dataset):
         df = self.data_record[self.data_record['Set'] == set_idx].set_index('CCD')
 
         def load(rel_path):
+            if os.name == "nt":  # Windows: normalise slashes
+                rel_path = rel_path.replace("/", "\\")
             return torch.from_numpy(
                 np.load(os.path.join(self.data_root, rel_path)).astype(np.float32)
             )
@@ -302,7 +294,14 @@ class DiffusionDataset(torch.utils.data.Dataset):
         ir_norm  = ((ir  - center) / scale).clamp(-10, 10)
         red_norm = ((red - center) / scale).clamp(-10, 10)
 
-        norm_stats = torch.stack([center, scale])   # (2,)
+        # Method B: subtract IR10 normalized mean (dc) so every scene enters
+        # the UNet with IR10 mean≈0.  This makes the global prior μ_IR≈0 and
+        # lets SCI work correctly with standard lambda values.
+        dc = ir_norm.mean()
+        ir_norm  = ir_norm  - dc
+        red_norm = red_norm - dc
+
+        norm_stats = torch.stack([center, scale, dc])   # (3,)
 
         return dict(
             ir=ir_norm,
@@ -318,7 +317,7 @@ def diffusion_collate_fn(batch):
     return dict(
         ir        =torch.stack([b['ir']         for b in batch]),   # (B, 1, H, W)
         red       =torch.stack([b['red']        for b in batch]),   # (B, 1, H, W)
-        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 2)
+        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 3) [center, scale, dc]
         obs_id    =[b['obs_id']   for b in batch],
         set_name  =[b['set_name'] for b in batch],
         date      =[b['date']     for b in batch],
