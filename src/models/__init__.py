@@ -7,6 +7,8 @@ from .cm_diff_unet import (
     CrossAttentionBlock,
     ModalityEncoder,
 )
+from .ir2red_ddpm import UNet as IR2REDUNet
+from .red2ir_ddpm import UNet as RED2IRUNet
 
 __all__ = [
     "UNet",
@@ -16,4 +18,6 @@ __all__ = [
     "ConvResBlock",
     "CrossAttentionBlock",
     "ModalityEncoder",
+    "IR2REDUNet",
+    "RED2IRUNet",
 ]

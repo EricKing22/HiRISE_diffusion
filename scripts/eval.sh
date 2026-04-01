@@ -22,8 +22,30 @@ echo -e "Job started on $(date)\n"
 PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
 DATA_ROOT=/scratch_root/ed425/HiRISE/
 CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
-CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest.pt
 PRIOR_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
+
+# Evaluation mode switch:
+#   bidirectional (default) | ir2red | red2ir
+EVAL_MODE=${1:-bidirectional}
+case "$EVAL_MODE" in
+    bidirectional|ir2red|red2ir) ;;
+    *)
+        echo "Invalid EVAL_MODE: $EVAL_MODE"
+        echo "Usage: sbatch eval.sh [bidirectional|ir2red|red2ir]"
+        exit 1
+        ;;
+esac
+
+if [ "$EVAL_MODE" = "bidirectional" ]; then
+    CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest_bidirectional.pt
+else
+    CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest_${EVAL_MODE}.pt
+fi
+
+# Backward-compatible fallback for old bidirectional checkpoint naming.
+if [ ! -f "$CHECKPOINT" ] && [ "$EVAL_MODE" = "bidirectional" ]; then
+    CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest.pt
+fi
 
 mkdir -p /scratch_root/ed425/HiRISE_diffusion/scripts/logs
 
@@ -32,147 +54,27 @@ cd $PROJECT_ROOT
 echo "Project root : $PROJECT_ROOT"
 echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
+echo "Eval mode    : $EVAL_MODE"
 echo "Checkpoint   : $CHECKPOINT"
 echo "Prior dir    : $PRIOR_DIR"
 echo ""
 
-# Metrics: MSE / MAE / PSNR / SSIM / Pearson-r  (FID disabled; remove --no_fid to enable)
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   0.0          \
-    --lambda_ccl   0.0          \
-    --no_fid                     \
-    --device       cuda
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   10.0          \
-    --lambda_ccl   10.0          \
-    --no_fid                     \
-    --device       cuda
-
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   20.0          \
-    --lambda_ccl   20.0          \
-    --no_fid                     \
-    --device       cuda
-
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   30.0          \
-    --lambda_ccl   30.0          \
-    --no_fid                     \
-    --device       cuda
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   40.0          \
-    --lambda_ccl   40.0          \
-    --no_fid                     \
-    --device       cuda
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   50.0          \
-    --lambda_ccl   50.0          \
-    --no_fid                     \
-    --device       cuda
-
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   60.0          \
-    --lambda_ccl   60.0          \
-    --no_fid                     \
-    --device       cuda
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   70.0          \
-    --lambda_ccl   70.0          \
-    --no_fid                     \
-    --device       cuda
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   80.0          \
-    --lambda_ccl   80.0          \
-    --no_fid                     \
-    --device       cuda
-
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   90.0          \
-    --lambda_ccl   90.0          \
-    --no_fid                     \
-    --device       cuda
-
-
-python src/eval.py \
-    --checkpoint   $CHECKPOINT   \
-    --prior_dir    $PRIOR_DIR    \
-    --data_root    $DATA_ROOT    \
-    --csv_path     $CSV_PATH     \
-    --max_samples  100           \
-    --batch_size   8             \
-    --lambda_scl   100.0          \
-    --lambda_ccl   100.0          \
-    --no_fid                     \
-    --device       cuda
+# Metrics: MSE / MAE / PSNR / SSIM / Pearson-r (FID disabled by default)
+for LAMBDA in 0.0 10.0 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0; do
+    echo "Running eval: mode=$EVAL_MODE  lambda=$LAMBDA"
+    python src/eval.py \
+        --checkpoint   $CHECKPOINT   \
+        --train_mode   $EVAL_MODE    \
+        --prior_dir    $PRIOR_DIR    \
+        --data_root    $DATA_ROOT    \
+        --csv_path     $CSV_PATH     \
+        --max_samples  100           \
+        --batch_size   8             \
+        --lambda_scl   $LAMBDA       \
+        --lambda_ccl   $LAMBDA       \
+        --no_fid                     \
+        --device       cuda
+done
 end_time=$(date +%s)
 
 echo -e "\nJob finished on $(date)"

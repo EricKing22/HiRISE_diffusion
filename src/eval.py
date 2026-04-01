@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import ModelConfig, TrainConfig, DataConfig, InferenceConfig
 from models.cm_diff_unet import UNet
+from models.ir2red_ddpm import UNet as IR2REDUNet
+from models.red2ir_ddpm import UNet as RED2IRUNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.process import q_sample, sobel_edge
 from compute_prior import load_prior_stats
@@ -110,6 +112,55 @@ def evaluate(
     avg_red2ir = red2ir_accum / max(n, 1)
     avg_loss   = avg_ir2red + avg_red2ir
 
+    return dict(
+        loss=avg_loss,
+        loss_ir2red=avg_ir2red,
+        loss_red2ir=avg_red2ir,
+    )
+
+
+def evaluate_unidirectional(
+    model: torch.nn.Module,
+    scheduler: DDPMScheduler,
+    val_loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    train_mode: str,
+) -> dict:
+    """Noise-prediction evaluation for single-direction models (ir2red/red2ir)."""
+    model.eval()
+    loss_accum = 0.0
+    n = 0
+
+    with torch.no_grad():
+        for batch in val_loader:
+            ir = batch["ir"].to(device)
+            red = batch["red"].to(device)
+            B = ir.shape[0]
+
+            if train_mode == "ir2red":
+                x_source, x_target = ir, red
+            elif train_mode == "red2ir":
+                x_source, x_target = red, ir
+            else:
+                raise ValueError(f"Unsupported mode for evaluate_unidirectional: {train_mode}")
+
+            edge = sobel_edge(x_source)
+            t = torch.randint(0, scheduler.timesteps, (B,), device=device)
+            noise = torch.randn_like(x_target)
+            x_t = q_sample(scheduler, x_target, t, noise)
+            eps_pred = model(x_t, x_source, edge, t)
+            loss = F.mse_loss(eps_pred, noise)
+
+            loss_accum += loss.item()
+            n += 1
+
+    avg = loss_accum / max(n, 1)
+    if train_mode == "ir2red":
+        avg_ir2red, avg_red2ir = avg, 0.0
+    else:
+        avg_ir2red, avg_red2ir = 0.0, avg
+
+    avg_loss = avg_ir2red + avg_red2ir
     return dict(
         loss=avg_loss,
         loss_ir2red=avg_ir2red,
@@ -489,9 +540,16 @@ def main() -> None:
                         help="Skip FID computation (faster, no torchvision needed)")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--device",      default="cuda")
+    parser.add_argument(
+        "--train_mode",
+        default="bidirectional",
+        choices=["bidirectional", "ir2red", "red2ir"],
+        help="Model/eval mode: bidirectional (full image metrics) or single-direction validation",
+    )
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
+    cfg_train = TrainConfig()
     cfg_data  = DataConfig()
     cfg_inf   = InferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -502,18 +560,36 @@ def main() -> None:
 
     print(f"Device       : {device}")
     print(f"Checkpoint   : {args.checkpoint}")
+    print(f"Mode         : {args.train_mode}")
     print(f"SCI          : lambda_scl={args.lambda_scl}  lambda_ccl={args.lambda_ccl}")
     print(f"Max samples  : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
     print()
 
-    model = UNet(
-        in_channels=cfg_model.in_channels,
-        out_channels=cfg_model.out_channels,
-        base_channels=cfg_model.base_channels,
-        num_res_blocks=cfg_model.num_res_blocks,
-        dropout=cfg_model.dropout,
-    ).to(device)
+    if args.train_mode == "bidirectional":
+        model = UNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
+    elif args.train_mode == "ir2red":
+        model = IR2REDUNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
+    else:
+        model = RED2IRUNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     model.load_state_dict(ckpt["model"])
@@ -532,11 +608,29 @@ def main() -> None:
 
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
-    val_sets = [19645, 7292, 7293, 14774]
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
+
+    if args.train_mode != "bidirectional":
+        val_loader = get_loader(
+            val_dataset,
+            batch_size=cfg_train.batch_size,
+            collate_fn=diffusion_collate_fn,
+            num_workers=4,
+            shuffle=False,
+        )
+        val_results = evaluate_unidirectional(
+            model=model,
+            scheduler=scheduler,
+            val_loader=val_loader,
+            device=device,
+            train_mode=args.train_mode,
+        )
+        print(f"[Validation: {args.train_mode}] loss={val_results['loss']:.4f}  "
+              f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")
+        return
 
     results = evaluate_images(
         model, scheduler, val_dataset,

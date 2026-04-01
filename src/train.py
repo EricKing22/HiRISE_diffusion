@@ -26,14 +26,16 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config import ModelConfig, TrainConfig, DataConfig
-from models.cm_diff_unet import UNet
+from models.cm_diff_unet import UNet as BidirectionalUNet
+from models.ir2red_ddpm import UNet as IR2REDUNet
+from models.red2ir_ddpm import UNet as RED2IRUNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.process import q_sample, sobel_edge
 
 # Add project root for data imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
-from eval import evaluate, get_val_split
+from eval import evaluate, evaluate_unidirectional, get_val_split
 
 
 # =============================================================================
@@ -83,6 +85,7 @@ def train_step(
     scheduler: DDPMScheduler,
     device:    torch.device,
     cfg_train: TrainConfig,
+    train_mode: str,
 ) -> torch.Tensor:
     """
     Compute L_joint for one batch.
@@ -99,44 +102,51 @@ def train_step(
     red = batch["red"].to(device)   # [B, 1, H, W]
     B   = ir.shape[0]
 
-    # Assign directions: first half = 0, second half = 1
-    half      = B // 2
-    direction = torch.cat([
-        torch.zeros(half,       dtype=torch.long, device=device),
-        torch.ones( B - half,   dtype=torch.long, device=device),
-    ])                                  # [B]
+    if train_mode == "bidirectional":
+        half      = B // 2
+        direction = torch.cat([
+            torch.zeros(half,       dtype=torch.long, device=device),
+            torch.ones(B - half,    dtype=torch.long, device=device),
+        ])
 
-    # Build source / target per sample based on direction
-    # direction=0: target=red, source=ir
-    # direction=1: target=ir,  source=red
-    mask       = (direction == 0)[:, None, None, None]   # [B,1,1,1] bool
-    x_target   = torch.where(mask, red, ir)              # [B,1,H,W]
-    x_source   = torch.where(mask, ir,  red)             # [B,1,H,W]
+        mask     = (direction == 0)[:, None, None, None]
+        x_target = torch.where(mask, red, ir)
+        x_source = torch.where(mask, ir, red)
 
-    # Sobel edge map from source (fixed structural prior)
+        with torch.no_grad():
+            edge = sobel_edge(x_source)
+
+        t     = torch.randint(0, scheduler.timesteps, (B,), device=device)
+        noise = torch.randn_like(x_target)
+        x_t   = q_sample(scheduler, x_target, t, noise)
+        eps_pred = model(x_t, x_source, edge, direction, t)
+
+        loss_per_sample = F.mse_loss(eps_pred, noise, reduction="none").mean(dim=[1, 2, 3])
+        mask_1d = (direction == 0)
+        loss_ir2red = loss_per_sample[mask_1d].mean() if mask_1d.any() else torch.tensor(0.0, device=device)
+        loss_red2ir = loss_per_sample[~mask_1d].mean() if (~mask_1d).any() else torch.tensor(0.0, device=device)
+        l_joint = cfg_train.lambda_ir_to_red * loss_ir2red + cfg_train.lambda_red_to_ir * loss_red2ir
+        return l_joint, loss_ir2red.item(), loss_red2ir.item()
+
+    if train_mode == "ir2red":
+        x_source, x_target = ir, red
+    elif train_mode == "red2ir":
+        x_source, x_target = red, ir
+    else:
+        raise ValueError(f"Unknown train_mode: {train_mode}")
+
     with torch.no_grad():
-        edge = sobel_edge(x_source)                      # [B,1,H,W]
+        edge = sobel_edge(x_source)
 
-    # Sample random timesteps t ~ Uniform(0, T-1)
     t     = torch.randint(0, scheduler.timesteps, (B,), device=device)
-
-    # Forward diffusion: add noise to target
     noise = torch.randn_like(x_target)
-    x_t   = q_sample(scheduler, x_target, t, noise)      # [B,1,H,W]
+    x_t   = q_sample(scheduler, x_target, t, noise)
+    eps_pred = model(x_t, x_source, edge, t)
+    loss = F.mse_loss(eps_pred, noise)
 
-    # Predict noise
-    eps_pred = model(x_t, x_source, edge, direction, t)  # [B,1,H,W]
-
-    # MSE loss between predicted and actual noise
-    loss_per_sample = F.mse_loss(eps_pred, noise, reduction="none").mean(dim=[1, 2, 3])
-
-    # Separate losses by direction for weighted L_joint
-    mask_1d   = (direction == 0)                          # [B]
-    loss_ir2red = loss_per_sample[mask_1d].mean()    if mask_1d.any()    else torch.tensor(0.0, device=device)
-    loss_red2ir = loss_per_sample[~mask_1d].mean()  if (~mask_1d).any() else torch.tensor(0.0, device=device)
-
-    l_joint = cfg_train.lambda_ir_to_red * loss_ir2red + cfg_train.lambda_red_to_ir * loss_red2ir
-    return l_joint, loss_ir2red.item(), loss_red2ir.item()
+    if train_mode == "ir2red":
+        return loss, loss.item(), 0.0
+    return loss, 0.0, loss.item()
 
 
 # =============================================================================
@@ -151,6 +161,12 @@ def main() -> None:
     parser.add_argument("--wandb_project",  default="HiRISE_diffusion", help="W&B project name")
     parser.add_argument("--run_name",       default=None,        help="W&B run name (auto-generated if omitted)")
     parser.add_argument("--no_wandb",       action="store_true", help="Disable W&B logging")
+    parser.add_argument(
+        "--train_mode",
+        default="bidirectional",
+        choices=["bidirectional", "ir2red", "red2ir"],
+        help="Training mode: shared bidirectional model or single-direction DDPM",
+    )
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
@@ -168,13 +184,35 @@ def main() -> None:
     ).to(device)
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model = UNet(
-        in_channels=cfg_model.in_channels,
-        out_channels=cfg_model.out_channels,
-        base_channels=cfg_model.base_channels,
-        num_res_blocks=cfg_model.num_res_blocks,
-        dropout=cfg_model.dropout,
-    ).to(device)
+    if args.train_mode == "bidirectional":
+        model = BidirectionalUNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
+        model_tag = "cm_diff_unet"
+    elif args.train_mode == "ir2red":
+        model = IR2REDUNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
+        model_tag = "ir2red_ddpm"
+    else:
+        model = RED2IRUNet(
+            in_channels=cfg_model.in_channels,
+            out_channels=cfg_model.out_channels,
+            base_channels=cfg_model.base_channels,
+            num_res_blocks=cfg_model.num_res_blocks,
+            dropout=cfg_model.dropout,
+        ).to(device)
+        model_tag = "red2ir_ddpm"
+
+    print(f"Training mode: {args.train_mode}  model={model_tag}")
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"UNet parameters: {n_params:,}")
@@ -238,6 +276,8 @@ def main() -> None:
                 "csv_path":  csv_path,
                 "n_params":  n_params,
                 "device":    str(device),
+                "train_mode": args.train_mode,
+                "model_tag": model_tag,
             },
             resume="allow",
         )
@@ -245,11 +285,11 @@ def main() -> None:
     # ── Resume from checkpoint if available ───────────────────────────────
     run_ts   = datetime.datetime.now().strftime("%m%d_%H%M")
     base_dir = args.ckpt_dir or os.path.join(os.path.dirname(__file__), "output")
-    ckpt_dir = os.path.join(base_dir, run_ts)
+    ckpt_dir = os.path.join(base_dir, f"{args.train_mode}_{run_ts}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     start_step  = 0
-    latest_ckpt = os.path.join(base_dir, "latest.pt")
+    latest_ckpt = os.path.join(base_dir, f"latest_{args.train_mode}.pt")
     if cfg_train.resume and os.path.exists(latest_ckpt):
         start_step = load_checkpoint(latest_ckpt, model, optimizer)
     elif not cfg_train.resume:
@@ -274,7 +314,7 @@ def main() -> None:
             batch     = next(data_iter)
 
         optimizer.zero_grad()
-        loss, loss_ir2red_val, loss_red2ir_val = train_step(batch, model, scheduler, device, cfg_train)
+        loss, loss_ir2red_val, loss_red2ir_val = train_step(batch, model, scheduler, device, cfg_train, args.train_mode)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -308,7 +348,11 @@ def main() -> None:
 
         # ── Validation ────────────────────────────────────────────────────
         if step % cfg_train.val_every == 0:
-            val_results = evaluate(model, scheduler, val_loader, device)
+            if args.train_mode == "bidirectional":
+                val_results = evaluate(model, scheduler, val_loader, device)
+            else:
+                val_results = evaluate_unidirectional(model, scheduler, val_loader, device, args.train_mode)
+
             print(f"  [val] step {step:>6}  loss={val_results['loss']:.4f}  "
                   f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")
             if use_wandb:

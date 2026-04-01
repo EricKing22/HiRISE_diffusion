@@ -45,7 +45,26 @@ cd $PROJECT_ROOT
 echo "Project root : $PROJECT_ROOT"
 echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
-echo "Checkpoint   : $CKPT_DIR"
+
+# Training mode switch:
+#   bidirectional (default) | ir2red | red2ir
+TRAIN_MODE=${1:-bidirectional}
+case "$TRAIN_MODE" in
+    bidirectional|ir2red|red2ir) ;;
+    *)
+        echo "Invalid TRAIN_MODE: $TRAIN_MODE"
+        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir]"
+        exit 1
+        ;;
+esac
+
+LATEST_CKPT=${CKPT_DIR}/latest_${TRAIN_MODE}.pt
+RUN_CKPT_PATTERN=${CKPT_DIR}/${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt
+
+echo "Checkpoint dir          : $CKPT_DIR"
+echo "Latest checkpoint file  : $LATEST_CKPT"
+echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
+echo "Train mode   : $TRAIN_MODE"
 echo ""
 
 python src/train.py \
@@ -53,7 +72,8 @@ python src/train.py \
     --csv_path      $CSV_PATH         \
     --ckpt_dir      $CKPT_DIR         \
     --wandb_project HiRISE_diffusion  \
-    --run_name      "slurm_${SLURM_JOB_ID}"
+    --run_name      "${TRAIN_MODE}_slurm_${SLURM_JOB_ID}" \
+    --train_mode    $TRAIN_MODE
 
 end_time=$(date +%s)
 
