@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import ModelConfig, InferenceConfig
 from models.cm_diff_unet import UNet
 from diffusion.scheduler import DDPMScheduler
-from diffusion.process import sobel_edge
+from diffusion.edge import compute_edge, load_dexined
 from compute_prior import (
     sci_l_scl, sci_l_ccl,
     load_prior_stats,
@@ -52,31 +52,30 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # =============================================================================
 
 def ddpm_step_sci(
-    model:       torch.nn.Module,
-    scheduler:   DDPMScheduler,
-    x_t:         torch.Tensor,       # [B, 1, H, W]  current noisy image
-    x_source:    torch.Tensor,       # [B, 1, H, W]  source modality (clean)
-    edge:        torch.Tensor,       # [B, 1, H, W]  edge map of source
-    direction:   torch.Tensor,       # [B]  long (0 or 1)
-    t_batch:     torch.Tensor,       # [B]  long  current timestep indices
-    prior_stats: dict,
-    cfg_inf:     InferenceConfig,
+    model:          torch.nn.Module,
+    scheduler:      DDPMScheduler,
+    x_t:            torch.Tensor,       # [B, 1, H, W]  current noisy image
+    x_source:       torch.Tensor,       # [B, 1, H, W]  source modality (clean)
+    edge:           torch.Tensor,       # [B, 1, H, W]  edge map of source
+    direction,                          # [B] long tensor, or None for unidirectional
+    t_batch:        torch.Tensor,       # [B]  long  current timestep indices
+    prior_stats:    dict,
+    cfg_inf:        InferenceConfig,
 ) -> torch.Tensor:
     """
     One reverse diffusion step t → t-1 with SCI gradient correction.
 
-    Steps:
-      1. eps_pred  = U-Net(x_t, x_source, edge, direction, t)
-      2. x_0_tilde = (x_t - sqrt(1-ab_t) * eps_pred) / sqrt(ab_t)
-      3. mu_q      = DDPM posterior mean  (Eq. 11)
-      4. g         = grad_{x_0_tilde}(L_cons)
-      5. mu_upd    = mu_q + sigma_q * g
-      6. x_{t-1}  ~ N(mu_upd, sigma_q)   [pure mu at t=0]
+    Args:
+        direction: [B] long tensor for bidirectional models (0=IR→RED, 1=RED→IR),
+                   or None for unidirectional models (no direction embedding).
     """
 
     # ── 1. Noise prediction ───────────────────────────────────────────────────
     with torch.no_grad():
-        eps_pred = model(x_t, x_source, edge, direction, t_batch)   # [B,1,H,W]
+        if direction is None:
+            eps_pred = model(x_t, x_source, edge, t_batch)           # [B,1,H,W]
+        else:
+            eps_pred = model(x_t, x_source, edge, direction, t_batch) # [B,1,H,W]
 
     # ── 2. Predicted clean image x_0_tilde ────────────────────────────────────
     sqrt_ab     = scheduler.gather(scheduler.sqrt_alpha_bar,    t_batch)   # [B,1,1,1]
@@ -136,25 +135,32 @@ def ddpm_step_sci(
 # =============================================================================
 
 def sample(
-    model:       torch.nn.Module,
-    scheduler:   DDPMScheduler,
-    x_source:    torch.Tensor,     # [B, 1, H, W]
-    direction:   int,              # 0 = IR→RED,  1 = RED→IR
-    prior_stats: dict,
-    cfg_inf:     InferenceConfig,
-    device:      torch.device,
-    verbose:     bool = True,
+    model:          torch.nn.Module,
+    scheduler:      DDPMScheduler,
+    x_source:       torch.Tensor,     # [B, 1, H, W]
+    direction,                        # int (0 or 1) for bidirectional, None for unidirectional
+    prior_stats:    dict,
+    cfg_inf:        InferenceConfig,
+    device:         torch.device,
+    verbose:        bool = True,
+    edge_mode:      str = "sobel",
+    dexined_model:  torch.nn.Module = None,
 ) -> torch.Tensor:
     """
     Full T-step reverse diffusion with SCI.
+
+    Args:
+        direction: 0 (IR→RED) or 1 (RED→IR) for bidirectional models,
+                   None for unidirectional models (ir2red / red2ir).
 
     Returns generated image x_0  [B, 1, H, W].
     """
     model.eval()
     B, _, H, W = x_source.shape
 
-    edge        = sobel_edge(x_source)
-    direction_t = torch.full((B,), direction, dtype=torch.long, device=device)
+    edge        = compute_edge(x_source, edge_mode, dexined_model)
+    direction_t = (torch.full((B,), direction, dtype=torch.long, device=device)
+                   if direction is not None else None)
 
     # Initialise x_T to match the training forward-process marginal at t=T:
     #   x_T = sqrt(ᾱ_T) * x_target + sqrt(1-ᾱ_T) * ε
@@ -213,6 +219,10 @@ def main() -> None:
                         help="Ground truth target image (.npy) for comparison (optional)")
     parser.add_argument("--device",     default="cuda",
                         help="Device: cuda or cpu")
+    parser.add_argument("--edge_mode",  default="sobel", choices=["sobel", "dexined"],
+                        help="Edge detector: sobel (default) or dexined")
+    parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
+                        help="Path to DexiNed pretrained weights (.pth)")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -234,6 +244,11 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded checkpoint  step={ckpt.get('step', '?')}  loss={ckpt.get('loss', '?'):.4f}")
+
+    # ── Edge detector ─────────────────────────────────────────────────────────
+    dexined_model = None
+    if args.edge_mode == "dexined":
+        dexined_model = load_dexined(args.dexined_weights, device)
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
     scheduler = DDPMScheduler(
@@ -313,7 +328,9 @@ def main() -> None:
 
     with torch.no_grad():
         result = sample(model, scheduler, x_source, args.direction,
-                        prior_stats, cfg_inf, device)
+                        prior_stats, cfg_inf, device,
+                        edge_mode=args.edge_mode,
+                        dexined_model=dexined_model)
 
     # ── Restore dc offset ─────────────────────────────────────────────────────
     result = result + dc.to(device)

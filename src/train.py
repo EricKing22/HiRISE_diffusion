@@ -30,7 +30,8 @@ from models.cm_diff_unet import UNet as BidirectionalUNet
 from models.ir2red_ddpm import UNet as IR2REDUNet
 from models.red2ir_ddpm import UNet as RED2IRUNet
 from diffusion.scheduler import DDPMScheduler
-from diffusion.process import q_sample, sobel_edge
+from diffusion.process import q_sample
+from diffusion.edge import compute_edge, load_dexined
 
 # Add project root for data imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -86,6 +87,8 @@ def train_step(
     device:    torch.device,
     cfg_train: TrainConfig,
     train_mode: str,
+    edge_mode: str = "sobel",
+    dexined_model: torch.nn.Module = None,
 ) -> torch.Tensor:
     """
     Compute L_joint for one batch.
@@ -114,7 +117,7 @@ def train_step(
         x_source = torch.where(mask, ir, red)
 
         with torch.no_grad():
-            edge = sobel_edge(x_source)
+            edge = compute_edge(x_source, edge_mode, dexined_model)
 
         t     = torch.randint(0, scheduler.timesteps, (B,), device=device)
         noise = torch.randn_like(x_target)
@@ -136,7 +139,7 @@ def train_step(
         raise ValueError(f"Unknown train_mode: {train_mode}")
 
     with torch.no_grad():
-        edge = sobel_edge(x_source)
+        edge = compute_edge(x_source, edge_mode, dexined_model)
 
     t     = torch.randint(0, scheduler.timesteps, (B,), device=device)
     noise = torch.randn_like(x_target)
@@ -167,6 +170,10 @@ def main() -> None:
         choices=["bidirectional", "ir2red", "red2ir"],
         help="Training mode: shared bidirectional model or single-direction DDPM",
     )
+    parser.add_argument("--edge_mode",  default="sobel", choices=["sobel", "dexined"],
+                        help="Edge detector: sobel (default) or dexined")
+    parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
+                        help="Path to DexiNed pretrained weights (.pth)")
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
@@ -212,7 +219,12 @@ def main() -> None:
         ).to(device)
         model_tag = "red2ir_ddpm"
 
-    print(f"Training mode: {args.train_mode}  model={model_tag}")
+    print(f"Training mode: {args.train_mode}  model={model_tag}  edge={args.edge_mode}")
+
+    # ── Edge detector ─────────────────────────────────────────────────────
+    dexined_model = None
+    if args.edge_mode == "dexined":
+        dexined_model = load_dexined(args.dexined_weights, device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"UNet parameters: {n_params:,}")
@@ -278,6 +290,7 @@ def main() -> None:
                 "device":    str(device),
                 "train_mode": args.train_mode,
                 "model_tag": model_tag,
+                "edge_mode": args.edge_mode,
             },
             resume="allow",
         )
@@ -314,7 +327,8 @@ def main() -> None:
             batch     = next(data_iter)
 
         optimizer.zero_grad()
-        loss, loss_ir2red_val, loss_red2ir_val = train_step(batch, model, scheduler, device, cfg_train, args.train_mode)
+        loss, loss_ir2red_val, loss_red2ir_val = train_step(batch, model, scheduler, device, cfg_train, args.train_mode,
+                                                              args.edge_mode, dexined_model)
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
@@ -349,9 +363,11 @@ def main() -> None:
         # ── Validation ────────────────────────────────────────────────────
         if step % cfg_train.val_every == 0:
             if args.train_mode == "bidirectional":
-                val_results = evaluate(model, scheduler, val_loader, device)
+                val_results = evaluate(model, scheduler, val_loader, device,
+                                       args.edge_mode, dexined_model)
             else:
-                val_results = evaluate_unidirectional(model, scheduler, val_loader, device, args.train_mode)
+                val_results = evaluate_unidirectional(model, scheduler, val_loader, device, args.train_mode,
+                                                      args.edge_mode, dexined_model)
 
             print(f"  [val] step {step:>6}  loss={val_results['loss']:.4f}  "
                   f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")

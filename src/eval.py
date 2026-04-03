@@ -28,12 +28,13 @@ from scipy import linalg as sp_linalg
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from config import ModelConfig, TrainConfig, DataConfig, InferenceConfig
+from config import ModelConfig, DataConfig, InferenceConfig
 from models.cm_diff_unet import UNet
 from models.ir2red_ddpm import UNet as IR2REDUNet
 from models.red2ir_ddpm import UNet as RED2IRUNet
 from diffusion.scheduler import DDPMScheduler
-from diffusion.process import q_sample, sobel_edge
+from diffusion.process import q_sample
+from diffusion.edge import compute_edge, load_dexined
 from compute_prior import load_prior_stats
 from inference import sample
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
@@ -48,6 +49,8 @@ def eval_batch(
     model:     torch.nn.Module,
     scheduler: DDPMScheduler,
     device:    torch.device,
+    edge_mode: str = "sobel",
+    dexined_model: torch.nn.Module = None,
 ) -> tuple:
     """
     Compute noise-prediction MSE for one batch, split by direction.
@@ -68,7 +71,7 @@ def eval_batch(
     x_target = torch.where(mask, red, ir)
     x_source = torch.where(mask, ir,  red)
 
-    edge = sobel_edge(x_source)
+    edge = compute_edge(x_source, edge_mode, dexined_model)
     t    = torch.randint(0, scheduler.timesteps, (B,), device=device)
 
     noise    = torch.randn_like(x_target)
@@ -89,6 +92,8 @@ def evaluate(
     scheduler:  DDPMScheduler,
     val_loader: torch.utils.data.DataLoader,
     device:     torch.device,
+    edge_mode:  str = "sobel",
+    dexined_model: torch.nn.Module = None,
 ) -> dict:
     """
     Noise-prediction evaluation over the full validation loader.
@@ -103,7 +108,8 @@ def evaluate(
 
     with torch.no_grad():
         for batch in val_loader:
-            v_ir2red, v_red2ir = eval_batch(batch, model, scheduler, device)
+            v_ir2red, v_red2ir = eval_batch(batch, model, scheduler, device,
+                                            edge_mode, dexined_model)
             ir2red_accum += v_ir2red
             red2ir_accum += v_red2ir
             n += 1
@@ -125,6 +131,8 @@ def evaluate_unidirectional(
     val_loader: torch.utils.data.DataLoader,
     device: torch.device,
     train_mode: str,
+    edge_mode: str = "sobel",
+    dexined_model: torch.nn.Module = None,
 ) -> dict:
     """Noise-prediction evaluation for single-direction models (ir2red/red2ir)."""
     model.eval()
@@ -144,7 +152,7 @@ def evaluate_unidirectional(
             else:
                 raise ValueError(f"Unsupported mode for evaluate_unidirectional: {train_mode}")
 
-            edge = sobel_edge(x_source)
+            edge = compute_edge(x_source, edge_mode, dexined_model)
             t = torch.randint(0, scheduler.timesteps, (B,), device=device)
             noise = torch.randn_like(x_target)
             x_t = q_sample(scheduler, x_target, t, noise)
@@ -292,6 +300,63 @@ def _fid_from_features(real_feats: np.ndarray, fake_feats: np.ndarray,
 # Image-level evaluation (full sampling)
 # =============================================================================
 
+def _eval_one_direction(
+    model, scheduler, src, tgt, direction, prior,
+    center, scale, dc,
+    cfg_inf, device, edge_mode, dexined_model,
+    compute_fid, inception, label,
+):
+    """
+    Full reverse diffusion for one (src→tgt) direction.
+
+    Args:
+        direction: int (0 or 1) for bidirectional, None for unidirectional.
+    Returns per-image metric lists and a progress string.
+    """
+    B = src.shape[0]
+
+    with torch.no_grad():
+        pred = sample(model, scheduler, src, direction=direction,
+                      prior_stats=prior, cfg_inf=cfg_inf, device=device,
+                      verbose=False, edge_mode=edge_mode,
+                      dexined_model=dexined_model)
+
+    pred_norm = pred.clamp(-10.0, 10.0)
+    pred_phys = (pred_norm + dc) * scale + center
+    tgt_phys  = (tgt       + dc) * scale + center
+
+    mse_phys_b = F.mse_loss(pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
+    mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
+    mse_norm_b = F.mse_loss(pred_norm, tgt,       reduction="none").mean(dim=[1,2,3])
+
+    ssim_phy_vals, ssim_norm_vals = [], []
+    for i in range(B):
+        tgt_phy_np  = tgt_phys[i].squeeze().cpu().numpy()
+        pred_phy_np = pred_phys[i].squeeze().cpu().numpy()
+        dr_phy = max(float(np.max(tgt_phy_np) - np.min(tgt_phy_np)), 1e-2)
+        ssim_phy_vals.append(_ssim_safe(tgt_phy_np, pred_phy_np, data_range=dr_phy))
+        ssim_norm_vals.append(_ssim_safe(
+            tgt[i].squeeze().cpu().numpy(),
+            pred_norm[i].squeeze().cpu().numpy(),
+            data_range=20.0))
+
+    with torch.no_grad():
+        pearson_b = _pearson_batch(pred_norm, tgt)
+
+    return dict(
+        mse_phys  = mse_phys_b.cpu().tolist(),
+        mae_phys  = mae_phys_b.cpu().tolist(),
+        mse_norm  = mse_norm_b.cpu().tolist(),
+        ssim_phys = ssim_phy_vals,
+        ssim_norm = ssim_norm_vals,
+        pearson   = pearson_b.cpu().tolist(),
+        fid_real  = _inception_features(tgt,       inception) if compute_fid else None,
+        fid_fake  = _inception_features(pred_norm, inception) if compute_fid else None,
+        progress  = (f"MSE({label})={mse_phys_b.mean():.4f}/{mse_norm_b.mean():.4f}  "
+                     f"SSIM phy={np.mean(ssim_phy_vals):.4f} norm={np.mean(ssim_norm_vals):.4f}"),
+    )
+
+
 def evaluate_images(
     model:          torch.nn.Module,
     scheduler:      DDPMScheduler,
@@ -304,57 +369,36 @@ def evaluate_images(
     batch_size:     int = 4,
     seed:           int = 42,
     compute_fid:    bool = True,
+    edge_mode:      str = "sobel",
+    dexined_model:  torch.nn.Module = None,
+    train_mode:     str = "bidirectional",
 ) -> dict:
     """
     Image-level evaluation: full T-step reverse diffusion in batches.
 
-    Metrics are computed in TWO spaces per direction (IR→RED and RED→IR):
+    train_mode controls which directions are evaluated:
+      "bidirectional" — both IR→RED and RED→IR
+      "ir2red"        — IR→RED only  (source=IR, target=RED)
+      "red2ir"        — RED→IR only  (source=RED, target=IR)
 
-    [Physical] — denormalized to original DN values (x_phys = x_norm * scale + center):
-      MSE/MAE  — mean squared/absolute error in physical DN units
-      PSNR     — fixed MAX=1.0. Using per-image (max-min) range as MAX breaks PSNR
-                 when MSE > range² (produces negative values). Fixed MAX ensures
-                 interpretable and comparable values across all scenes.
-      Note: MSE/MAE are scene-dependent — a scene with scale=0.1 has 100× smaller
-        MSE_phys than a scene with scale=0.01 for the same relative error.
-
-    [Normalized] — in the model's clamp(-10, 10) operating space:
-      MSE      — comparable across scenes (MSE_phys / scale² eliminates scale variance)
-      PSNR     — fixed MAX=20 (range of clamp interval [-10, 10])
-      This space is the primary metric for cross-run / cross-λ model comparison.
-
-    [Structural] (normalized space):
-      SSIM     — structural similarity (inputs shifted to [0,1] internally)
-      Pearson r — linear correlation, invariant to affine transforms
-
-    FID (optional) — computed in physical space for InceptionV3 compatibility.
+    Inactive directions return float('nan') in the results dict.
     """
-
     model.eval()
     n = len(val_dataset)
     if max_samples > 0:
         n = min(n, max_samples)
-
     dataset = (torch.utils.data.Subset(val_dataset, list(range(n)))
                if n < len(val_dataset) else val_dataset)
     loader  = get_loader(dataset, batch_size=batch_size, collate_fn=diffusion_collate_fn,
                          num_workers=4, shuffle=False)
 
-    # Per-image metric accumulators
-    # Physical space (denormalized — original DN values)
-    mse_phys_0, mae_phys_0 = [], []
-    mse_phys_1, mae_phys_1 = [], []
-    # Normalized space (model's operating range — comparable across scenes)
-    mse_norm_0 = []
-    mse_norm_1 = []
-    ssim_0, ssim_0_phy, pearson_0 = [], [], []
-    ssim_1, ssim_1_phy, pearson_1 = [], [], []
+    # Per-direction accumulators — index 0 = IR→RED, index 1 = RED→IR
+    accs = [{k: [] for k in ("mse_phys", "mae_phys", "mse_norm",
+                              "ssim_norm", "ssim_phys", "pearson",
+                              "fid_real",  "fid_fake")}
+            for _ in range(2)]
 
-    # FID feature accumulators
-    if compute_fid:
-        inception = _build_inception(device)
-        real_f0, fake_f0 = [], []   # IR→RED: real=RED GT, fake=pred RED
-        real_f1, fake_f1 = [], []   # RED→IR: real=IR  GT, fake=pred IR
+    inception = _build_inception(device) if compute_fid else None
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -363,138 +407,87 @@ def evaluate_images(
     n_done = 0
 
     for batch in loader:
-        ir_batch  = batch["ir"].to(device)    # [B, 1, H, W]
-        red_batch = batch["red"].to(device)   # [B, 1, H, W]
-        B = ir_batch.shape[0]
+        ir  = batch["ir"].to(device)
+        red = batch["red"].to(device)
+        B   = ir.shape[0]
 
-        with torch.no_grad():
-            pred_red = sample(model, scheduler, ir_batch,  direction=0,
-                              prior_stats=prior_red, cfg_inf=cfg_inf, device=device,
-                              verbose=False)
-            pred_ir  = sample(model, scheduler, red_batch, direction=1,
-                              prior_stats=prior_ir,  cfg_inf=cfg_inf, device=device,
-                              verbose=False)
+        norm_stats = batch["norm_stats"]
+        center = norm_stats[:, :1, None, None].to(device)
+        scale  = norm_stats[:, 1:2, None, None].to(device)
+        dc     = norm_stats[:, 2:3, None, None].to(device)
 
-        # Clamp DDPM outputs to the valid training range.
-        pred_red_norm = pred_red.clamp(-10.0, 10.0)
-        pred_ir_norm  = pred_ir.clamp(-10.0, 10.0)
+        shared = dict(center=center, scale=scale, dc=dc,
+                      cfg_inf=cfg_inf, device=device, edge_mode=edge_mode,
+                      dexined_model=dexined_model,
+                      compute_fid=compute_fid, inception=inception)
 
-        # ── Denormalization (physical DN space) ──────────────────────────────
-        norm_stats = batch["norm_stats"]      # [B, 3] = (center, scale, dc)
-        center = norm_stats[:, :1, None, None].to(device)   # [B, 1, 1, 1]
-        scale  = norm_stats[:, 1:2, None, None].to(device)  # [B, 1, 1, 1]
-        dc     = norm_stats[:, 2:3, None, None].to(device)  # [B, 1, 1, 1]
+        progress_parts = [f"  [{n_done + B}/{n}]"]
 
-        pred_red_phys = (pred_red_norm + dc) * scale + center
-        pred_ir_phys  = (pred_ir_norm  + dc) * scale + center
-        red_gt_phys   = (red_batch + dc) * scale + center
-        ir_gt_phys    = (ir_batch  + dc) * scale + center
+        if train_mode in ("bidirectional", "ir2red"):
+            d = 0 if train_mode == "bidirectional" else None
+            m = _eval_one_direction(model, scheduler, src=ir, tgt=red,
+                                    direction=d, prior=prior_red,
+                                    label="IR→RED", **shared)
+            for k in ("mse_phys", "mae_phys", "mse_norm", "ssim_phys", "ssim_norm", "pearson"):
+                accs[0][k].extend(m[k])
+            if compute_fid:
+                accs[0]["fid_real"].append(m["fid_real"])
+                accs[0]["fid_fake"].append(m["fid_fake"])
+            progress_parts.append(m["progress"])
+
+        if train_mode in ("bidirectional", "red2ir"):
+            d = 1 if train_mode == "bidirectional" else None
+            m = _eval_one_direction(model, scheduler, src=red, tgt=ir,
+                                    direction=d, prior=prior_ir,
+                                    label="RED→IR", **shared)
+            for k in ("mse_phys", "mae_phys", "mse_norm", "ssim_phys", "ssim_norm", "pearson"):
+                accs[1][k].extend(m[k])
+            if compute_fid:
+                accs[1]["fid_real"].append(m["fid_real"])
+                accs[1]["fid_fake"].append(m["fid_fake"])
+            progress_parts.append(m["progress"])
 
         n_done += B
+        print("  |  ".join(progress_parts))
 
-        # ── Physical-space pixel metrics ────────────────────────────────────
-        mse_phys0_b  = F.mse_loss(pred_red_phys, red_gt_phys, reduction="none").mean(dim=[1,2,3])
-        mse_phys1_b  = F.mse_loss(pred_ir_phys,  ir_gt_phys,  reduction="none").mean(dim=[1,2,3])
-        mae_phys0_b  = F.l1_loss( pred_red_phys, red_gt_phys, reduction="none").mean(dim=[1,2,3])
-        mae_phys1_b  = F.l1_loss( pred_ir_phys,  ir_gt_phys,  reduction="none").mean(dim=[1,2,3])
-
-        # ── Normalized-space pixel metrics ───────────────────────────────────
-        mse_norm0_b  = F.mse_loss(pred_red_norm, red_batch,  reduction="none").mean(dim=[1,2,3])
-        mse_norm1_b  = F.mse_loss(pred_ir_norm,  ir_batch,   reduction="none").mean(dim=[1,2,3])
-
-        # ── SSIM in physical / normalized spaces (explicit data_range) ─────
-        ssim0_phy_vals, ssim1_phy_vals = [], []
-        ssim0_vals, ssim1_vals = [], []
-        for i in range(B):
-            gt0_np   = red_gt_phys[i].squeeze().cpu().numpy()
-            pred0_np = pred_red_phys[i].squeeze().cpu().numpy()
-            gt1_np   = ir_gt_phys[i].squeeze().cpu().numpy()
-            pred1_np = pred_ir_phys[i].squeeze().cpu().numpy()
-            dr0_phy = max(float(np.max(gt0_np) - np.min(gt0_np)), 1e-2)
-            dr1_phy = max(float(np.max(gt1_np) - np.min(gt1_np)), 1e-2)
-            ssim0_phy_vals.append(_ssim_safe(gt0_np, pred0_np, data_range=dr0_phy))
-            ssim1_phy_vals.append(_ssim_safe(gt1_np, pred1_np, data_range=dr1_phy))
-
-            # normalized space: model range is clamp([-10, 10]) => data_range=20
-            gt0_np = red_batch[i].squeeze().cpu().numpy()
-            pred0_np = pred_red_norm[i].squeeze().cpu().numpy()
-            gt1_np = ir_batch[i].squeeze().cpu().numpy()
-            pred1_np = pred_ir_norm[i].squeeze().cpu().numpy()
-            ssim0_vals.append(_ssim_safe(gt0_np, pred0_np, data_range=20.0))
-            ssim1_vals.append(_ssim_safe(gt1_np, pred1_np, data_range=20.0))
-
-        # ── Pearson (normalized space — invariant to affine transforms) ──────
-        with torch.no_grad():
-            pearson0_b = _pearson_batch(pred_red_norm, red_batch)
-            pearson1_b = _pearson_batch(pred_ir_norm,  ir_batch)
-
-        # ── Accumulate ──────────────────────────────────────────────────────
-        mse_phys_0.extend(mse_phys0_b.cpu().tolist())
-        mse_phys_1.extend(mse_phys1_b.cpu().tolist())
-        mae_phys_0.extend(mae_phys0_b.cpu().tolist())
-        mae_phys_1.extend(mae_phys1_b.cpu().tolist())
-        mse_norm_0.extend(mse_norm0_b.cpu().tolist())
-        mse_norm_1.extend(mse_norm1_b.cpu().tolist())
-        ssim_0.extend(ssim0_vals)
-        ssim_1.extend(ssim1_vals)
-        ssim_0_phy.extend(ssim0_phy_vals)
-        ssim_1_phy.extend(ssim1_phy_vals)
-        pearson_0.extend(pearson0_b.cpu().tolist())
-        pearson_1.extend(pearson1_b.cpu().tolist())
-
-        # ── FID features (normalized space for InceptionV3) ─────────────────
-        if compute_fid:
-            real_f0.append(_inception_features(red_batch,     inception))
-            fake_f0.append(_inception_features(pred_red_norm, inception))
-            real_f1.append(_inception_features(ir_batch,      inception))
-            fake_f1.append(_inception_features(pred_ir_norm,  inception))
-
-        print(f"  [{n_done}/{n}]  "
-              f"MSE(IR→RED)={mse_phys0_b.mean():.4f}/{mse_norm0_b.mean():.4f}  "
-              f"SSIM phy={np.mean(ssim_0_phy):.4f} SSIM norm = {np.mean(ssim_0):.4f}  "
-              f"| "
-              f"MSE(RED→IR)={mse_phys1_b.mean():.4f}/{mse_norm1_b.mean():.4f}  "
-              f"SSIM phy={np.mean(ssim_1_phy):.4f}" f" SSIM norm = {np.mean(ssim_1):.4f}  "
-              f"| "
-        )
-
-    def _avg(lst): return float(np.mean(lst))
-    def _psnr_pooled(mse_list, max_val):
-        """Global PSNR from pooled (averaged) MSE — avoids per-image inflation."""
-        avg_mse = float(np.mean(mse_list))
+    def _avg(lst):
+        return float(np.mean(lst)) if lst else float("nan")
+    def _psnr_pooled(lst, max_val):
+        if not lst:
+            return float("nan")
+        avg_mse = float(np.mean(lst))
         return 10.0 * math.log10(max_val ** 2 / avg_mse) if avg_mse > 0 else 0.0
 
+    a0, a1 = accs[0], accs[1]
     results = dict(
-        n_samples   = n_done,
-        # ── Physical-space (original DN values) ────────────────────────────
-        mse_phys_ir2red  = _avg(mse_phys_0),
-        mae_phys_ir2red  = _avg(mae_phys_0),
-        psnr_phys_ir2red = _psnr_pooled(mse_phys_0, 1.0),
-        mse_phys_red2ir  = _avg(mse_phys_1),
-        mae_phys_red2ir  = _avg(mae_phys_1),
-        psnr_phys_red2ir = _psnr_pooled(mse_phys_1, 1.0),
-        # ── Normalized-space (comparable across scenes) ─────────────────────
-        mse_norm_ir2red  = _avg(mse_norm_0),
-        psnr_norm_ir2red = _psnr_pooled(mse_norm_0, 20.0),
-        mse_norm_red2ir  = _avg(mse_norm_1),
-        psnr_norm_red2ir = _psnr_pooled(mse_norm_1, 20.0),
-        # ── Structural ─────────────────────────────────────────────────────
-    ssim_norm_ir2red = _avg(ssim_0),
-    ssim_norm_red2ir = _avg(ssim_1),
-    ssim_phys_ir2red = _avg(ssim_0_phy),
-    ssim_phys_red2ir = _avg(ssim_1_phy),
-        pearson_ir2red = _avg(pearson_0),
-        pearson_red2ir = _avg(pearson_1),
+        n_samples        = n_done,
+        mse_phys_ir2red  = _avg(a0["mse_phys"]),
+        mae_phys_ir2red  = _avg(a0["mae_phys"]),
+        psnr_phys_ir2red = _psnr_pooled(a0["mse_phys"], 1.0),
+        mse_phys_red2ir  = _avg(a1["mse_phys"]),
+        mae_phys_red2ir  = _avg(a1["mae_phys"]),
+        psnr_phys_red2ir = _psnr_pooled(a1["mse_phys"], 1.0),
+        mse_norm_ir2red  = _avg(a0["mse_norm"]),
+        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], 20.0),
+        mse_norm_red2ir  = _avg(a1["mse_norm"]),
+        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], 20.0),
+        ssim_norm_ir2red = _avg(a0["ssim_norm"]),
+        ssim_norm_red2ir = _avg(a1["ssim_norm"]),
+        ssim_phys_ir2red = _avg(a0["ssim_phys"]),
+        ssim_phys_red2ir = _avg(a1["ssim_phys"]),
+        pearson_ir2red   = _avg(a0["pearson"]),
+        pearson_red2ir   = _avg(a1["pearson"]),
     )
 
-    if compute_fid and len(real_f0) > 0:
-        real_0 = np.concatenate(real_f0, axis=0)
-        fake_0 = np.concatenate(fake_f0, axis=0)
-        real_1 = np.concatenate(real_f1, axis=0)
-        fake_1 = np.concatenate(fake_f1, axis=0)
-        results["fid_ir2red"] = _fid_from_features(real_0, fake_0)
-        results["fid_red2ir"] = _fid_from_features(real_1, fake_1)
-        print(f"  FID(IR→RED)={results['fid_ir2red']:.2f}  FID(RED→IR)={results['fid_red2ir']:.2f}")
+    if compute_fid:
+        for key, a in (("fid_ir2red", a0), ("fid_red2ir", a1)):
+            if a["fid_real"]:
+                results[key] = _fid_from_features(
+                    np.concatenate(a["fid_real"]), np.concatenate(a["fid_fake"]))
+        fid_parts = [f"FID({k})={results[k]:.2f}"
+                     for k in ("fid_ir2red", "fid_red2ir") if k in results]
+        if fid_parts:
+            print(f"  {'  '.join(fid_parts)}")
 
     return results
 
@@ -526,7 +519,7 @@ def get_val_split(dr: pd.DataFrame):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate CM-Diff — full image metrics")
-    parser.add_argument("--checkpoint",  default="src/output/latest.pt")
+    parser.add_argument("--checkpoint",  default="src/output/latest_bidirectional.pt")
     parser.add_argument("--prior_dir",   default="src/output",
                         help="Directory containing prior_ir.pt and prior_red.pt")
     parser.add_argument("--data_root",   default=r"D:\Imperial\IRP\HiRISE_diffusion\data")
@@ -534,8 +527,8 @@ def main() -> None:
     parser.add_argument("--max_samples", type=int, default=0,
                         help="Max samples (0 = all)")
     parser.add_argument("--batch_size",  type=int, default=4)
-    parser.add_argument("--lambda_scl",  type=float, default=70.0)
-    parser.add_argument("--lambda_ccl",  type=float, default=70.0)
+    parser.add_argument("--lambda_scl",  type=float, default=0.0)
+    parser.add_argument("--lambda_ccl",  type=float, default=0.0)
     parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster, no torchvision needed)")
     parser.add_argument("--seed",        type=int, default=42)
@@ -546,10 +539,13 @@ def main() -> None:
         choices=["bidirectional", "ir2red", "red2ir"],
         help="Model/eval mode: bidirectional (full image metrics) or single-direction validation",
     )
+    parser.add_argument("--edge_mode",  default="dexined", choices=["sobel", "dexined"],
+                        help="Edge detector: sobel (default) or dexined")
+    parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
+                        help="Path to DexiNed pretrained weights (.pth)")
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
-    cfg_train = TrainConfig()
     cfg_data  = DataConfig()
     cfg_inf   = InferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -595,6 +591,11 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     print(f"Loaded checkpoint: step={ckpt.get('step','?')}  loss={ckpt.get('loss','?'):.4f}")
 
+    # ── Edge detector ─────────────────────────────────────────────────────────
+    dexined_model = None
+    if args.edge_mode == "dexined":
+        dexined_model = load_dexined(args.dexined_weights, device)
+
     scheduler = DDPMScheduler(
         timesteps=cfg_model.timesteps,
         beta_start=cfg_model.beta_start,
@@ -608,29 +609,11 @@ def main() -> None:
 
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
+    val_sets = [19645, 7292, 7293, 14774]
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
-
-    if args.train_mode != "bidirectional":
-        val_loader = get_loader(
-            val_dataset,
-            batch_size=cfg_train.batch_size,
-            collate_fn=diffusion_collate_fn,
-            num_workers=4,
-            shuffle=False,
-        )
-        val_results = evaluate_unidirectional(
-            model=model,
-            scheduler=scheduler,
-            val_loader=val_loader,
-            device=device,
-            train_mode=args.train_mode,
-        )
-        print(f"[Validation: {args.train_mode}] loss={val_results['loss']:.4f}  "
-              f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")
-        return
 
     results = evaluate_images(
         model, scheduler, val_dataset,
@@ -640,37 +623,44 @@ def main() -> None:
         batch_size=args.batch_size,
         seed=args.seed,
         compute_fid=not args.no_fid,
+        edge_mode=args.edge_mode,
+        dexined_model=dexined_model,
+        train_mode=args.train_mode,
     )
+
+    def _f4(v):  return f"{v:>10.4f}" if not math.isnan(v) else f"{'—':>10}"
+    def _f2(v):  return f"{v:>10.2f}" if not math.isnan(v) else f"{'—':>10}"
+    def _avg2(a, b): return f"{(a+b)/2:>10.4f}" if not (math.isnan(a) or math.isnan(b)) else f"{'—':>10}"
+    def _avg2f2(a, b): return f"{(a+b)/2:>10.2f}" if not (math.isnan(a) or math.isnan(b)) else f"{'—':>10}"
 
     W = 14
     print(f"\n{'='*68}")
     print(f"{'Metric':<{W}}  {'IR→RED':>10}  {'RED→IR':>10}  {'Combined':>10}")
     print(f"{'─'*68}")
-    # Physical space (denormalized — original DN values)
     print(f"{'[Physical]':<{W}}")
-    print(f"{'  MSE':<{W}}  {results['mse_phys_ir2red']:>10.4f}  {results['mse_phys_red2ir']:>10.4f}  "
-          f"{(results['mse_phys_ir2red']+results['mse_phys_red2ir'])/2:>10.4f}")
-    print(f"{'  MAE':<{W}}  {results['mae_phys_ir2red']:>10.4f}  {results['mae_phys_red2ir']:>10.4f}  {'—':>10}")
-    print(f"{'  PSNR (dB)':<{W}}  {results['psnr_phys_ir2red']:>10.2f}  {results['psnr_phys_red2ir']:>10.2f}  "
-          f"{(results['psnr_phys_ir2red']+results['psnr_phys_red2ir'])/2:>10.2f}")
-    # Normalized space (comparable across scenes)
+    print(f"{'  MSE':<{W}}  {_f4(results['mse_phys_ir2red'])}  {_f4(results['mse_phys_red2ir'])}  "
+          f"{_avg2(results['mse_phys_ir2red'], results['mse_phys_red2ir'])}")
+    print(f"{'  MAE':<{W}}  {_f4(results['mae_phys_ir2red'])}  {_f4(results['mae_phys_red2ir'])}  {'—':>10}")
+    print(f"{'  PSNR (dB)':<{W}}  {_f2(results['psnr_phys_ir2red'])}  {_f2(results['psnr_phys_red2ir'])}  "
+          f"{_avg2f2(results['psnr_phys_ir2red'], results['psnr_phys_red2ir'])}")
     print(f"{'[Normalized]':<{W}}")
-    print(f"{'  MSE':<{W}}  {results['mse_norm_ir2red']:>10.4f}  {results['mse_norm_red2ir']:>10.4f}  "
-          f"{(results['mse_norm_ir2red']+results['mse_norm_red2ir'])/2:>10.4f}")
-    print(f"{'  PSNR (dB)':<{W}}  {results['psnr_norm_ir2red']:>10.2f}  {results['psnr_norm_red2ir']:>10.2f}  "
-          f"{(results['psnr_norm_ir2red']+results['psnr_norm_red2ir'])/2:>10.2f}")
-    # Structural
+    print(f"{'  MSE':<{W}}  {_f4(results['mse_norm_ir2red'])}  {_f4(results['mse_norm_red2ir'])}  "
+          f"{_avg2(results['mse_norm_ir2red'], results['mse_norm_red2ir'])}")
+    print(f"{'  PSNR (dB)':<{W}}  {_f2(results['psnr_norm_ir2red'])}  {_f2(results['psnr_norm_red2ir'])}  "
+          f"{_avg2f2(results['psnr_norm_ir2red'], results['psnr_norm_red2ir'])}")
     print(f"{'[Structural]':<{W}}")
-    print(f"{'SSIM (norm)':<{W}}  {results['ssim_norm_ir2red']:>10.4f}  {results['ssim_norm_red2ir']:>10.4f}  "
-        f"{(results['ssim_norm_ir2red']+results['ssim_norm_red2ir'])/2:>10.4f}")
-    print(f"{'SSIM (phys)':<{W}}  {results['ssim_phys_ir2red']:>10.4f}  {results['ssim_phys_red2ir']:>10.4f}  "
-        f"{(results['ssim_phys_ir2red']+results['ssim_phys_red2ir'])/2:>10.4f}")
-    print(f"{'Pearson r':<{W}}  {results['pearson_ir2red']:>10.4f}  {results['pearson_red2ir']:>10.4f}  {'—':>10}")
-    if "fid_ir2red" in results:
-        print(f"{'FID':<{W}}  {results['fid_ir2red']:>10.2f}  {results['fid_red2ir']:>10.2f}  {'—':>10}")
+    print(f"{'SSIM (norm)':<{W}}  {_f4(results['ssim_norm_ir2red'])}  {_f4(results['ssim_norm_red2ir'])}  "
+          f"{_avg2(results['ssim_norm_ir2red'], results['ssim_norm_red2ir'])}")
+    print(f"{'SSIM (phys)':<{W}}  {_f4(results['ssim_phys_ir2red'])}  {_f4(results['ssim_phys_red2ir'])}  "
+          f"{_avg2(results['ssim_phys_ir2red'], results['ssim_phys_red2ir'])}")
+    print(f"{'Pearson r':<{W}}  {_f4(results['pearson_ir2red'])}  {_f4(results['pearson_red2ir'])}  {'—':>10}")
+    if "fid_ir2red" in results or "fid_red2ir" in results:
+        fid0 = results.get("fid_ir2red", float("nan"))
+        fid1 = results.get("fid_red2ir", float("nan"))
+        print(f"{'FID':<{W}}  {_f2(fid0)}  {_f2(fid1)}  {'—':>10}")
     print(f"{'='*68}")
-    print(f"(n={results['n_samples']}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
-    print(f"  Physical PSNR:  MAX=1.0  |  Normalized PSNR:  MAX=20  |  SSIM physical space (custom, per-image GT range, floor=0.01)")
+    print(f"(n={results['n_samples']}  mode={args.train_mode}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
+    print(f"  Physical PSNR: MAX=1.0  |  Normalized PSNR: MAX=20  |  SSIM physical: per-image GT range, floor=0.01")
 
 
 if __name__ == "__main__":

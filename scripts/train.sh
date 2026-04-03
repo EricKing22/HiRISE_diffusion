@@ -53,7 +53,19 @@ case "$TRAIN_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir]"
+        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
+        exit 1
+        ;;
+esac
+
+# Edge detection mode switch:
+#   sobel (default) | dexined
+EDGE_MODE=${2:-dexined}
+case "$EDGE_MODE" in
+    sobel|dexined) ;;
+    *)
+        echo "Invalid EDGE_MODE: $EDGE_MODE"
+        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
         exit 1
         ;;
 esac
@@ -65,15 +77,25 @@ echo "Checkpoint dir          : $CKPT_DIR"
 echo "Latest checkpoint file  : $LATEST_CKPT"
 echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
 echo "Train mode   : $TRAIN_MODE"
+echo "Edge mode    : $EDGE_MODE"
 echo ""
+
+if [ "$TRAIN_MODE" = "bidirectional" ]; then
+    wandb_project=HiRISE_diffusion
+elif [ "$TRAIN_MODE" = "ir2red" ]; then
+    wandb_project=HiRISE_diffusion_ir2red
+else
+    wandb_project=HiRISE_diffusion_red2ir
+fi
 
 python src/train.py \
     --data_root     $DATA_ROOT        \
     --csv_path      $CSV_PATH         \
     --ckpt_dir      $CKPT_DIR         \
-    --wandb_project HiRISE_diffusion  \
-    --run_name      "${TRAIN_MODE}_slurm_${SLURM_JOB_ID}" \
-    --train_mode    $TRAIN_MODE
+    --wandb_project $wandb_project   \
+    --run_name      "${TRAIN_MODE}_${EDGE_MODE}_slurm_${SLURM_JOB_ID}" \
+    --train_mode    $TRAIN_MODE       \
+    --edge_mode     $EDGE_MODE
 
 end_time=$(date +%s)
 

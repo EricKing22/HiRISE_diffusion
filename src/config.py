@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -8,6 +10,10 @@ class ModelConfig(BaseModel):
     base_channels:  int = 128    # C; channel widths follow [C/2, C, C, 2C, 2C, 4C]
     num_res_blocks: int = 3      # ResBlocks per resolution level
     dropout:        float = 0.0
+
+    # ── Edge detection ────────────────────────────────────────────────────────
+    edge_mode:         Literal["sobel", "dexined"] = "sobel"
+    dexined_weights:   str = "checkpoints/dexined_biped.pth"   # path to pretrained DexiNed .pth
 
     # ── Diffusion schedule ────────────────────────────────────────────────────
     timesteps:      int   = 1000

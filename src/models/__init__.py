@@ -9,6 +9,7 @@ from .cm_diff_unet import (
 )
 from .ir2red_ddpm import UNet as IR2REDUNet
 from .red2ir_ddpm import UNet as RED2IRUNet
+from .dexined import DexiNed
 
 __all__ = [
     "UNet",
@@ -20,4 +21,5 @@ __all__ = [
     "ModalityEncoder",
     "IR2REDUNet",
     "RED2IRUNet",
+    "DexiNed",
 ]
