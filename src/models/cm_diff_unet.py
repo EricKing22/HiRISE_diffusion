@@ -654,4 +654,4 @@ class UNet(nn.Module):
                 up_idx += 1
 
         # ── Output: predicted noise ε ──────────────────────────────────────
-        return self.out_conv(self.out_act(self.out_norm(h)))  # [B, 3, H, W]
+        return self.out_conv(self.out_act(self.out_norm(h)))  # [B, 1, H, W]
