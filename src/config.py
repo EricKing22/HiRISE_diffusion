@@ -63,3 +63,44 @@ class InferenceConfig(BaseModel):
 
     # ── Sampling ──────────────────────────────────────────────────────────────
     timesteps:   int   = 1000  # number of denoising steps (same as training)
+
+
+# =============================================================================
+# Flow Matching configs
+# =============================================================================
+
+class FMModelConfig(BaseModel):
+    # ── FM U-Net architecture (same backbone as DDPM, different I/O) ──────
+    in_channels:    int   = 1      # just x_t (source injected via cross-attention)
+    out_channels:   int   = 1      # predicted velocity v
+    base_channels:  int   = 128    # same as DDPM
+    num_res_blocks: int   = 3
+    dropout:        float = 0.0
+    t_scale:        float = 1000.0 # scale continuous t ∈ [0,1] before sinusoidal embedding
+
+    # ── Edge detection (optional, disabled by default for FM baseline) ────
+    edge_mode:         Literal["sobel", "dexined", "none"] = "none"
+    dexined_weights:   str = "checkpoints/dexined_biped.pth"
+
+
+class FMTrainConfig(BaseModel):
+    # ── Data ──────────────────────────────────────────────────────────────
+    image_size:     int   = 256
+    batch_size:     int   = 8
+
+    # ── Optimiser (same as DDPM for fair comparison) ─────────────────────
+    lr:             float = 1e-4
+    lr_decay:       float = 0.9
+    lr_decay_every: int   = 5000
+    total_steps:    int   = 100_000
+
+    # ── Checkpoint & logging ──────────────────────────────────────────────
+    save_every:     int   = 5_000
+    log_every:      int   = 500
+    val_every:      int   = 1000
+    resume:         bool  = False
+
+
+class FMInferenceConfig(BaseModel):
+    # ── ODE solver ────────────────────────────────────────────────────────
+    num_steps:      int   = 50     # Euler ODE steps (vs DDPM's 1000)
