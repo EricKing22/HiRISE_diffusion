@@ -174,6 +174,8 @@ def main() -> None:
                         help="Edge detector: sobel (default) or dexined")
     parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
                         help="Path to DexiNed pretrained weights (.pth)")
+    parser.add_argument("--no_dc", action="store_true",
+                        help="Disable Method B dc subtraction (IR mean kept non-zero)")
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
@@ -248,13 +250,14 @@ def main() -> None:
     train_obs = dr[dr["Set"].isin(train_sets)]["Observation"].unique()
     val_obs   = dr[dr["Set"].isin(val_sets)]["Observation"].unique()
 
+    use_dc = not args.no_dc
     train_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=train_sets,
+        allowed_sets=train_sets, dc=use_dc,
     )
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets,
+        allowed_sets=val_sets, dc=use_dc,
     )
 
     loader = get_loader(

@@ -65,10 +65,23 @@ case "$EDGE_MODE" in
     sobel|dexined) ;;
     *)
         echo "Invalid EDGE_MODE: $EDGE_MODE"
-        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
+        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
         exit 1
         ;;
 esac
+
+# DC offset mode (Method B): dc (default) | no_dc
+DC_MODE=${3:-dc}
+case "$DC_MODE" in
+    dc|no_dc) ;;
+    *)
+        echo "Invalid DC_MODE: $DC_MODE"
+        echo "Usage: sbatch train.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        exit 1
+        ;;
+esac
+DC_FLAG=""
+[ "$DC_MODE" = "no_dc" ] && DC_FLAG="--no_dc"
 
 LATEST_CKPT=${CKPT_DIR}/latest_${TRAIN_MODE}.pt
 RUN_CKPT_PATTERN=${CKPT_DIR}/${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt
@@ -78,6 +91,7 @@ echo "Latest checkpoint file  : $LATEST_CKPT"
 echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
 echo "Train mode   : $TRAIN_MODE"
 echo "Edge mode    : $EDGE_MODE"
+echo "DC mode      : $DC_MODE"
 echo ""
 
 if [ "$TRAIN_MODE" = "bidirectional" ]; then
@@ -93,9 +107,10 @@ python src/train.py \
     --csv_path      $CSV_PATH         \
     --ckpt_dir      $CKPT_DIR         \
     --wandb_project $wandb_project   \
-    --run_name      "${TRAIN_MODE}_${EDGE_MODE}_slurm_${SLURM_JOB_ID}" \
+    --run_name      "${TRAIN_MODE}_${EDGE_MODE}_${DC_MODE}_slurm_${SLURM_JOB_ID}" \
     --train_mode    $TRAIN_MODE       \
-    --edge_mode     $EDGE_MODE
+    --edge_mode     $EDGE_MODE        \
+    $DC_FLAG
 
 end_time=$(date +%s)
 

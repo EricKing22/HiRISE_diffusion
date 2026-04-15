@@ -251,7 +251,8 @@ class DiffusionDataset(torch.utils.data.Dataset):
     date       : str
     """
 
-    def __init__(self, data_record, data_root=None, sweep=True, allowed_sets=None):
+    def __init__(self, data_record, data_root=None, sweep=True, allowed_sets=None, dc=True):
+        self.dc = dc
         if allowed_sets is not None:
             data_record = data_record[data_record['Set'].isin(allowed_sets)]
         if data_record.empty:
@@ -297,11 +298,14 @@ class DiffusionDataset(torch.utils.data.Dataset):
         # Method B: subtract IR10 normalized mean (dc) so every scene enters
         # the UNet with IR10 mean≈0.  This makes the global prior μ_IR≈0 and
         # lets SCI work correctly with standard lambda values.
-        dc = ir_norm.mean()
-        ir_norm  = ir_norm  - dc
-        red_norm = red_norm - dc
+        if self.dc:
+            dc_val = ir_norm.mean()
+        else:
+            dc_val = torch.zeros((), dtype=ir_norm.dtype)
+        ir_norm  = ir_norm  - dc_val
+        red_norm = red_norm - dc_val
 
-        norm_stats = torch.stack([center, scale, dc])   # (3,)
+        norm_stats = torch.stack([center, scale, dc_val])   # (3,)
 
         return dict(
             ir=ir_norm,

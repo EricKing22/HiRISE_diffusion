@@ -191,7 +191,7 @@ def compute_prior_from_dataset(
         )
     print(f"[prior] {dr['Observation'].nunique()} observations available — building prior ...")
 
-    dataset = DiffusionDataset(data_record=dr, data_root=data_root, sweep=True)
+    dataset = DiffusionDataset(data_record=dr, data_root=data_root, sweep=True, dc=True)
     print(f"[prior] {len(dataset)} sets — collecting pixels ...")
 
     def _iter_modality(key):
@@ -221,6 +221,8 @@ def main() -> None:
                         help="Output directory for prior_ir.pt and prior_red.pt")
     parser.add_argument("--bins",      type=int, default=256)
     parser.add_argument("--device",    default="cpu")
+    parser.add_argument("--no_dc", action="store_true",
+                        help="Disable Method B dc subtraction (must match training setting)")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -251,7 +253,7 @@ def main() -> None:
             f"No .npy files found under data_root='{args.data_root}'."
         )
 
-    dataset = DiffusionDataset(data_record=dr, data_root=args.data_root, sweep=True)
+    dataset = DiffusionDataset(data_record=dr, data_root=args.data_root, sweep=True, dc=not args.no_dc)
     n = len(dataset)
     print(f"Dataset sets : {n}")
     print("Collecting pixels ...")

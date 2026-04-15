@@ -40,6 +40,19 @@ esac
 #   sobel (default) | dexined
 EDGE_MODE=${2:-sobel}
 
+# DC offset mode (Method B): dc (default) | no_dc
+DC_MODE=${3:-dc}
+case "$DC_MODE" in
+    dc|no_dc) ;;
+    *)
+        echo "Invalid DC_MODE: $DC_MODE"
+        echo "Usage: sbatch eval.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        exit 1
+        ;;
+esac
+DC_FLAG=""
+[ "$DC_MODE" = "no_dc" ] && DC_FLAG="--no_dc"
+
 if [ "$EVAL_MODE" = "bidirectional" ]; then
     CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest_bidirectional.pt
 else
@@ -60,6 +73,7 @@ echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 echo "Eval mode    : $EVAL_MODE"
 echo "Edge mode    : $EDGE_MODE"
+echo "DC mode      : $DC_MODE"
 echo "Checkpoint   : $CHECKPOINT"
 echo "Prior dir    : $PRIOR_DIR"
 echo ""
@@ -79,7 +93,8 @@ for LAMBDA in 0.0 10.0 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0; do
         --lambda_ccl   $LAMBDA       \
         --no_fid                     \
         --device       cuda          \
-        --edge_mode    $EDGE_MODE
+        --edge_mode    $EDGE_MODE    \
+        $DC_FLAG
 done
 end_time=$(date +%s)
 

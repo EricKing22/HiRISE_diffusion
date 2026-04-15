@@ -328,6 +328,7 @@ def _eval_one_direction(
     mse_phys_b = F.mse_loss(pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
     mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
     mse_norm_b = F.mse_loss(pred_norm, tgt,       reduction="none").mean(dim=[1,2,3])
+    mae_norm_b = F.l1_loss( pred_norm, tgt,        reduction="none").mean(dim=[1,2,3])
 
     ssim_phy_vals, ssim_norm_vals = [], []
     for i in range(B):
@@ -347,6 +348,7 @@ def _eval_one_direction(
         mse_phys  = mse_phys_b.cpu().tolist(),
         mae_phys  = mae_phys_b.cpu().tolist(),
         mse_norm  = mse_norm_b.cpu().tolist(),
+        mae_norm  = mae_norm_b.cpu().tolist(),
         ssim_phys = ssim_phy_vals,
         ssim_norm = ssim_norm_vals,
         pearson   = pearson_b.cpu().tolist(),
@@ -393,7 +395,7 @@ def evaluate_images(
                          num_workers=4, shuffle=False)
 
     # Per-direction accumulators — index 0 = IR→RED, index 1 = RED→IR
-    accs = [{k: [] for k in ("mse_phys", "mae_phys", "mse_norm",
+    accs = [{k: [] for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
                               "ssim_norm", "ssim_phys", "pearson",
                               "fid_real",  "fid_fake")}
             for _ in range(2)]
@@ -428,7 +430,7 @@ def evaluate_images(
             m = _eval_one_direction(model, scheduler, src=ir, tgt=red,
                                     direction=d, prior=prior_red,
                                     label="IR→RED", **shared)
-            for k in ("mse_phys", "mae_phys", "mse_norm", "ssim_phys", "ssim_norm", "pearson"):
+            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm", "ssim_phys", "ssim_norm", "pearson"):
                 accs[0][k].extend(m[k])
             if compute_fid:
                 accs[0]["fid_real"].append(m["fid_real"])
@@ -440,7 +442,7 @@ def evaluate_images(
             m = _eval_one_direction(model, scheduler, src=red, tgt=ir,
                                     direction=d, prior=prior_ir,
                                     label="RED→IR", **shared)
-            for k in ("mse_phys", "mae_phys", "mse_norm", "ssim_phys", "ssim_norm", "pearson"):
+            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm", "ssim_phys", "ssim_norm", "pearson"):
                 accs[1][k].extend(m[k])
             if compute_fid:
                 accs[1]["fid_real"].append(m["fid_real"])
@@ -461,20 +463,23 @@ def evaluate_images(
     a0, a1 = accs[0], accs[1]
     results = dict(
         n_samples        = n_done,
+        # Physical space
         mse_phys_ir2red  = _avg(a0["mse_phys"]),
         mae_phys_ir2red  = _avg(a0["mae_phys"]),
-        psnr_phys_ir2red = _psnr_pooled(a0["mse_phys"], 1.0),
+        ssim_phys_ir2red = _avg(a0["ssim_phys"]),
         mse_phys_red2ir  = _avg(a1["mse_phys"]),
         mae_phys_red2ir  = _avg(a1["mae_phys"]),
-        psnr_phys_red2ir = _psnr_pooled(a1["mse_phys"], 1.0),
-        mse_norm_ir2red  = _avg(a0["mse_norm"]),
-        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], 20.0),
-        mse_norm_red2ir  = _avg(a1["mse_norm"]),
-        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], 20.0),
-        ssim_norm_ir2red = _avg(a0["ssim_norm"]),
-        ssim_norm_red2ir = _avg(a1["ssim_norm"]),
-        ssim_phys_ir2red = _avg(a0["ssim_phys"]),
         ssim_phys_red2ir = _avg(a1["ssim_phys"]),
+        # Normalized space
+        mse_norm_ir2red  = _avg(a0["mse_norm"]),
+        mae_norm_ir2red  = _avg(a0["mae_norm"]),
+        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], 20.0),
+        ssim_norm_ir2red = _avg(a0["ssim_norm"]),
+        mse_norm_red2ir  = _avg(a1["mse_norm"]),
+        mae_norm_red2ir  = _avg(a1["mae_norm"]),
+        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], 20.0),
+        ssim_norm_red2ir = _avg(a1["ssim_norm"]),
+        # Statistical
         pearson_ir2red   = _avg(a0["pearson"]),
         pearson_red2ir   = _avg(a1["pearson"]),
     )
@@ -543,6 +548,8 @@ def main() -> None:
                         help="Edge detector: sobel (default) or dexined")
     parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
                         help="Path to DexiNed pretrained weights (.pth)")
+    parser.add_argument("--no_dc", action="store_true",
+                        help="Disable Method B dc subtraction (must match training setting)")
     args = parser.parse_args()
 
     cfg_model = ModelConfig()
@@ -611,7 +618,8 @@ def main() -> None:
     _, val_sets = get_val_split(dr)
     val_sets = [19645, 7292, 7293, 14774]
     val_dataset = DiffusionDataset(
-        data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
+        data_record=dr, data_root=data_root, sweep=True,
+        allowed_sets=val_sets, dc=not args.no_dc,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
 
@@ -640,19 +648,20 @@ def main() -> None:
     print(f"{'[Physical]':<{W}}")
     print(f"{'  MSE':<{W}}  {_f4(results['mse_phys_ir2red'])}  {_f4(results['mse_phys_red2ir'])}  "
           f"{_avg2(results['mse_phys_ir2red'], results['mse_phys_red2ir'])}")
-    print(f"{'  MAE':<{W}}  {_f4(results['mae_phys_ir2red'])}  {_f4(results['mae_phys_red2ir'])}  {'—':>10}")
-    print(f"{'  PSNR (dB)':<{W}}  {_f2(results['psnr_phys_ir2red'])}  {_f2(results['psnr_phys_red2ir'])}  "
-          f"{_avg2f2(results['psnr_phys_ir2red'], results['psnr_phys_red2ir'])}")
+    print(f"{'  MAE':<{W}}  {_f4(results['mae_phys_ir2red'])}  {_f4(results['mae_phys_red2ir'])}  "
+          f"{_avg2(results['mae_phys_ir2red'], results['mae_phys_red2ir'])}")
+    print(f"{'  SSIM':<{W}}  {_f4(results['ssim_phys_ir2red'])}  {_f4(results['ssim_phys_red2ir'])}  "
+          f"{_avg2(results['ssim_phys_ir2red'], results['ssim_phys_red2ir'])}")
     print(f"{'[Normalized]':<{W}}")
     print(f"{'  MSE':<{W}}  {_f4(results['mse_norm_ir2red'])}  {_f4(results['mse_norm_red2ir'])}  "
           f"{_avg2(results['mse_norm_ir2red'], results['mse_norm_red2ir'])}")
+    print(f"{'  MAE':<{W}}  {_f4(results['mae_norm_ir2red'])}  {_f4(results['mae_norm_red2ir'])}  "
+          f"{_avg2(results['mae_norm_ir2red'], results['mae_norm_red2ir'])}")
     print(f"{'  PSNR (dB)':<{W}}  {_f2(results['psnr_norm_ir2red'])}  {_f2(results['psnr_norm_red2ir'])}  "
           f"{_avg2f2(results['psnr_norm_ir2red'], results['psnr_norm_red2ir'])}")
-    print(f"{'[Structural]':<{W}}")
-    print(f"{'SSIM (norm)':<{W}}  {_f4(results['ssim_norm_ir2red'])}  {_f4(results['ssim_norm_red2ir'])}  "
+    print(f"{'  SSIM':<{W}}  {_f4(results['ssim_norm_ir2red'])}  {_f4(results['ssim_norm_red2ir'])}  "
           f"{_avg2(results['ssim_norm_ir2red'], results['ssim_norm_red2ir'])}")
-    print(f"{'SSIM (phys)':<{W}}  {_f4(results['ssim_phys_ir2red'])}  {_f4(results['ssim_phys_red2ir'])}  "
-          f"{_avg2(results['ssim_phys_ir2red'], results['ssim_phys_red2ir'])}")
+    print(f"{'─'*68}")
     print(f"{'Pearson r':<{W}}  {_f4(results['pearson_ir2red'])}  {_f4(results['pearson_red2ir'])}  {'—':>10}")
     if "fid_ir2red" in results or "fid_red2ir" in results:
         fid0 = results.get("fid_ir2red", float("nan"))
@@ -660,7 +669,8 @@ def main() -> None:
         print(f"{'FID':<{W}}  {_f2(fid0)}  {_f2(fid1)}  {'—':>10}")
     print(f"{'='*68}")
     print(f"(n={results['n_samples']}  mode={args.train_mode}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
-    print(f"  Physical PSNR: MAX=1.0  |  Normalized PSNR: MAX=20  |  SSIM physical: per-image GT range, floor=0.01")
+    print(f"  PSNR (normalized, MAX=20) ≡ PSNR (physical, MAX=1.0) under scale=0.05 normalisation")
+    print(f"  SSIM physical: per-image GT dynamic range, floor=0.01")
 
 
 if __name__ == "__main__":
