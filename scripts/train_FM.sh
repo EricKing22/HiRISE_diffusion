@@ -75,7 +75,7 @@ else
     wandb_project=HiRISE_diffusion_fm_red2ir
 fi
 
-python src/train_fm.py \
+python -u src/train_fm.py \
     --data_root     $DATA_ROOT        \
     --csv_path      $CSV_PATH         \
     --ckpt_dir      $CKPT_DIR         \

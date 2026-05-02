@@ -96,6 +96,8 @@ def fm_train_step(
 
     if train_mode == "ir2red":
         return loss, loss.item(), 0.0
+    elif train_mode == "red2ir":
+        return loss, 0.0, loss.item()
     return loss, 0.0, loss.item()
 
 

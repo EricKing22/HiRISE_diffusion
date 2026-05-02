@@ -71,7 +71,7 @@ class InferenceConfig(BaseModel):
 
 class FMModelConfig(BaseModel):
     # ── FM U-Net architecture (same backbone as DDPM, different I/O) ──────
-    in_channels:    int   = 1      # just x_t (source injected via cross-attention)
+    in_channels:    int   = 2      # x_t and x_src concatenated; source also via cross-attention
     out_channels:   int   = 1      # predicted velocity v
     base_channels:  int   = 128    # same as DDPM
     num_res_blocks: int   = 3

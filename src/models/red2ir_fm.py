@@ -46,7 +46,7 @@ class FMUNet(nn.Module):
 
     def __init__(
         self,
-        in_channels:    int   = 1,
+        in_channels:    int   = 2,
         out_channels:   int   = 1,
         base_channels:  int   = 128,
         num_res_blocks: int   = 3,
@@ -69,7 +69,7 @@ class FMUNet(nn.Module):
         # Single source encoder: extracts multi-scale features for CFC K/V.
         self.source_encoder = ModalityEncoder(in_channels=1, base_channels=C)
 
-        # Stem: only x_t enters (1 channel for FM baseline).
+        # Stem: x_t and x_src concatenated (2 channels).
         self.stem = nn.Conv2d(in_channels, ch[0], 3, padding=1)
 
         # ── Encoder ──────────────────────────────────────────────────────
@@ -141,9 +141,11 @@ class FMUNet(nn.Module):
         x_src: torch.Tensor,   # [B, 1, H, W]  source modality image (RED)
         t:     torch.Tensor,   # [B]            continuous time in [0, 1]
     ) -> torch.Tensor:         # [B, 1, H, W]  predicted velocity v
+        # Concatenate x_t and x_src along channels for the stem input (experiment).
+        z = torch.cat([x_t, x_src], dim=1)  # [B, 2, H, W]
 
         # 1) Stem — only the interpolated sample enters the U-Net.
-        h = self.stem(x_t)
+        h = self.stem(z)
 
         # 2) Time embedding: scale continuous t to match sinusoidal frequency range.
         emb = self.time_emb(t * self.t_scale)
