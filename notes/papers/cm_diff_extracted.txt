@@ -1,0 +1,1778 @@
+--- Page 1 ---
+CM-Diff: A Single Generative Network for Bidirectional Cross-Modality
+Translation Diffusion Model Between Infrared and Visible Images
+Bin Hu1 Chenqiang Gao1,2* Shurui Liu2 Fang Chen3
+Junjie Guo1 Fangcen Liu1 Junwei Han1,4
+1Chongqing University of Posts and Telecommunications 2Sun Yat-sen University
+3University of California, Merced 4Northwestern Polytechnical University
+{haydengauthiero,liufc67,gjj893866738,liushr6688}@gmail.com, gaochq6@mail.sysu.edu.cn,
+fchen20@ucmerced.edu, jhan@nwpu.edu.cn
+Abstract
+Image translation is one of the crucial approaches for mitigat-
+ing information deficiencies in the infrared and visible modal-
+ities, while also facilitating the enhancement of modality-
+specific datasets. However, existing methods for infrared and
+visible image translation either achieve unidirectional modal-
+ity translation or rely on cycle consistency for bidirectional
+modality translation, which may result in suboptimal per-
+formance. In this work, we present the bidirectional cross-
+modality translation diffusion model (CM-Diff) for simul-
+taneously modeling data distributions in both the infrared
+and visible modalities. We address this challenge by com-
+bining translation direction labels for guidance during train-
+ing with cross-modality feature control. Specifically, we view
+the establishment of the mapping relationship between the
+two modalities as the process of learning data distributions
+and understanding modality differences, achieved through a
+novel Bidirectional Diffusion Training (BDT). Additionally,
+we propose a Statistical Constraint Inference (SCI) to ensure
+the generated image closely adheres to the data distribution of
+the target modality. Experimental results demonstrate the su-
+periority of our CM-Diff over state-of-the-art methods, high-
+lighting its potential for generating dual-modality datasets.
+Introduction
+Infrared (IR) and visible (VIS) imaging are two common
+modalities in visual perception within the computer vi-
+sion community. Infrared images are captured on the ba-
+sis of the thermal radiation emitted by objects, which makes
+them invariant to illumination conditions and robust against
+environmental disturbances such as low light and smoke
+(Liu et al. 2024). Nevertheless, they lack color, texture,
+and detailed information, which limits their ability to an-
+alyze fine-grained objects. On the other hand, visible im-
+ages are formed by the reflection of light from objects,
+providing rich color, texture, and detailed information, en-
+abling precise object representation and fine-grained analy-
+sis. This disparity in the characteristics of infrared and vis-
+ible imaging creates a complementary relationship between
+the two modalities, making their integration or alternation
+crucial for robust real-world applications. Given the com-
+plementary strengths and limitations of visible and infrared
+imaging, dual-modality methods often outperform single-
+modality methods, particularly in tasks like object detection
+Adjust and Retraining
+Single translation network 
+for Visible-to-Infrared image translation task
+Single translation network 
+for Infrared-to-Visible image translation task
+Cycle consistency
+Single translation network  
+A
+for Visible-to-Infrared image translation task
+Single translation network  
+B
+for Infrared-to-Visible image translation task
+Bidirectional Diffusion Training
+Single translation network 
+(a) Unidirectional methods
+(b) Existing bidirectional methods
+(c) Ours
+Infrared-to-Visible
+image translation task
+Visible-to-Infrared
+image translation task
+Figure 1: Comparison of infrared-visible image translation
+methods: (a) Unidirectional methods require network modi-
+fications and retraining to enable translation in the opposite
+direction; (b) Bidirectional methods employ two indepen-
+dent generative networks and utilize cycle consistency for
+simultaneous training; (c) CM-Diff introduces Bidirectional
+Diffusion Training (BDT), eliminating the need for separate
+networks and reducing the computational overhead and re-
+training time associated with unidirectional methods.
+(Guo et al. 2024; Fu et al. 2023; Li et al. 2023) and seman-
+tic segmentation (Liu et al. 2023b; Ji et al. 2023; Deng et al.
+2021). However, these methods usually rely on a large, well-
+aligned dual-modality dataset, while in practice, acquiring
+such registered dual-modality datasets is challenging and
+costly. Thus, a natural idea is to leverage image translation
+techniques to generate dual-modality datasets.
+Recent infrared-visible image translation methods have
+achieved promising results using Generative Adversarial
+Networks (GANs) (Liu et al. 2018; Wang et al. 2024; Han
+et al. 2024a; Luo et al. 2022; Di et al. 2019; Yadav, Singh,
+arXiv:2503.09514v2  [cs.CV]  7 Aug 2025
+--- Page 2 ---
+and Dubey 2023; Han et al. 2024b) and Denoising Diffusion
+Probabilistic Models (DDPMs) (Ding et al. 2025; Sasaki,
+Willcocks, and Breckon 2021; Nair and Patel 2023; Lin et al.
+2024; Oliveira et al. 2024), which can be broadly classified
+into two categories: bidirectional image translation meth-
+ods and unidirectional image translation methods. Bidirec-
+tional methods (Zhu et al. 2017; Liu, Breuel, and Kautz
+2017; Han et al. 2021; Luo et al. 2022; Sasaki, Willcocks,
+and Breckon 2021) typically employ two independent gen-
+erative networks to establish mappings between the infrared
+and visible modalities, often relying on a cycle consistency
+method, as shown in Fig. 1 (b). Although the cycle con-
+sistency based methods have proven to be effective in en-
+suring modality correspondence, it not only increases the
+complexity of the network architecture but also frequently
+leads to perceptual blurriness and loss of fine details in the
+generated outputs (Zhu et al. 2017; Maqsood, Abid et al.).
+Unidirectional methods (Zhang et al. 2018b; Di et al. 2019;
+Isola et al. 2017; Yadav, Singh, and Dubey 2023; Ma et al.
+2024; Boroujeni and Razi 2024; Han et al. 2024b) leverage
+a single generative network to model the mapping in one
+direction, either infrared-to-visible image translation or vice
+versa. Consequently, they require separate training processes
+for each translation direction to achieve bidirectional modal-
+ity translation, as shown in Fig. 1 (a).
+In this paper, we propose a unified framework called
+CM-Diff. The core idea is to enable joint learning of in-
+frared and visible image data using a Bidirectional Diffusion
+Training (BDT), as shown in Fig. 1 (c). This method incor-
+porates implicit prompts through input channel positions,
+combined with explicit directional label embedding. This
+method is further refined by a multi-level Cross-modality
+Feature Control (CFC), which enhances semantic control
+over the translation process. Consequently, it eliminates re-
+liance on the cycle-consistency method while enabling more
+precise mapping between the two data modalities. Further-
+more, we observe that after implementing bidirectional con-
+version, the issue of color distortion becomes critically se-
+vere when directly applying the original ancestral sampling
+method (Koller and Friedman 2009; Yang et al. 2023) for
+infrared-visible image translation. To address this, we pro-
+pose a Statistical Constraint Inference (SCI), which lever-
+ages statistical mean constraints tailored to different datasets
+and scenarios. By incorporating these statistical properties,
+we mitigate abnormalities caused by the inherent random-
+ness in the reverse Markov chain of DDPM, ensuring that
+the generated images maintain high fidelity and align closely
+with real-world distributions. The main contributions of this
+paper can be summarized as follows:
+• A unified CM-Diff framework for bidirectional
+IR–VIS translation. We propose CM-Diff with a Bidi-
+rectional Diffusion Training (BDT) that encodes direc-
+tion labels and source-domain features into a single U-
+Net, enabling IR →VIS and VIS →IR mappings without
+dual networks or additional consistency losses.
+• Statistical Constraint Inference (SCI) for distribu-
+tional alignment. By integrating domain-specific statis-
+tics (e.g., thermal variance) into the reverse diffusion pro-
+cess, SCI corrects sampling drift and aligns the gener-
+ated image distribution with real data, effectively reduc-
+ing anomalies and color distortion.
+• Extensive experimental validation. Comprehensive ex-
+periments on standard benchmarks demonstrate that our
+method outperforms existing approaches in both quanti-
+tative metrics and qualitative visual consistency, address-
+ing modality absence and misalignment issues.
+Related Work
+Cross-modality translation between infrared and visible im-
+ages is a challenging task due to the significant modality
+gap in texture, color, and semantics. Existing approaches can
+be broadly categorized into GAN-based, DDPM-based, and
+more recent bidirectional generative modeling techniques.
+GAN-based Cross-Modality Image Translation
+Generative Adversarial Networks have been widely used for
+IR-VIS translation tasks, often leveraging pixel-level super-
+vision or perceptual loss to bridge the modality gap. For
+IR→VIS, TV A-GAN (Yadav, Singh, and Dubey 2023) in-
+corporates attention and inception-based features to improve
+local structural detail, while I2V-GAN (Li et al. 2021) adds
+cyclic and perceptual constraints to achieve temporal coher-
+ence in video translation. ROMA (Yu et al. 2022) and EADS
+(Ren et al. 2023) enhance semantic alignment by integrating
+edge or similarity priors. In contrast, VIS →IR translation
+focuses on thermal realism. For example, VTF-GAN (Or-
+dun, Raff, and Purushotham 2023) introduces Fourier losses
+to recover frequency-aware details, and IC-GAN (Boroujeni
+and Razi 2024) employs color-space mapping to reduce ap-
+pearance distortion in remote sensing.
+While GANs produce sharp outputs, they are prone to
+mode collapse and training instability. More importantly,
+most methods are unidirectional, requiring separate train-
+ing for each direction. Bidirectional translation using GANs
+typically relies on two models with cycle consistency (e.g.,
+CycleGAN variants), which adds training overhead and may
+degrade translation quality.
+DDPM-based Cross-Modality Image Translation
+Diffusion models offer an alternative that avoids GAN-
+specific instabilities by gradually denoising from noise via a
+Markov chain. T2V-DDPM (Nair and Patel 2023) pioneers
+their use in IR-to-VIS face translation under low-light condi-
+tions, while UNIT-DDPM (Sasaki, Willcocks, and Breckon
+2021) jointly models both modalities through dual-domain
+Markov chains. However, these methods remain unidirec-
+tional and require retraining to switch translation direction.
+Some diffusion-based editing methods support partial re-
+versibility. SDEdit (Meng et al. 2021), for instance, enables
+image synthesis through partial denoising but assumes con-
+ditional masks and is primarily used in unpaired settings.
+EGSDE (Zhao et al. 2022) introduces energy-guided sam-
+pling, yet it remains unpaired and task-specific. These tech-
+niques are not directly comparable due to assumptions not
+holding in our paired IR-VIS domain.
+--- Page 3 ---
+Bidirectional Diffusion and Bridge Models
+To eliminate the need for dual generators or cycle loss, sev-
+eral works propose bidirectional learning within a single
+model. Bidirectional Consistency Models (BCM) (Li and He
+2024) introduce a consistency loss to regularize one diffu-
+sion model for both directions, but they operate in unpaired
+domains. In contrast, our setting assumes paired supervision,
+which allows stronger data-driven training signals.
+Similarly, Cycle-Free CycleGAN (Kwon and Ye 2021)
+avoids cycle loss by using an invertible generator in medi-
+cal imaging, which still differs architecturally and assumes
+invertibility—an assumption hard to satisfy in IR-VIS tasks
+due to non-invertible thermal content. Schr ¨odinger Bridge
+methods such as I²SB (Liu et al. 2023a) and CBD (He et al.
+2024) formulate bidirectional generation as stochastic trans-
+port, relying on bridging distributions. These methods are
+theoretically elegant but often require iterative sampling or
+multi-step alignment and are more suited to unsupervised or
+unpaired tasks.
+Unlike these approaches, our method is the first to enable
+bidirectional IR↔VIS generation using a single shared dif-
+fusion model. The direction of translation is encoded via the
+timestep embedding, without requiring auxiliary supervision
+or additional inference passes.
+Method
+Given a set of paired infrared images X IR = {xIR
+1 , · · · , xIR
+N |
+x ∈ RH×W ×CIR } and visible images X VIS =
+{xVIS
+1 , · · · , xVIS
+N | x ∈ RH×W ×CVIS }, our goal is to train
+a model ZN capable of translating infrared images X IR into
+their corresponding visible counterparts ˆX VIS , while also be-
+ing able to perform the reverse translation from visible im-
+ages X VIS to infrared images ˆX IR. To accomplish this task,
+we propose a bidirectional end-to-end framework, CM-Diff.
+Bidirectional Diffusion Training (BDT)
+Paired infrared (IR) and visible (VIS) images contain sim-
+ilar semantic information, but their data distributions dif-
+fer significantly due to the distinct imaging characteristics
+of each modality. To simultaneously learn these two data
+distributions and establish a bidirectional mapping relation-
+ship, we propose a Bidirectional Diffusion Training (BDT).
+Our strategy uses a U-Net architecture network, as shown in
+Fig. 2 (a), to simultaneously learn and distinguish the vis-
+ible modality data xVIS
+0 ∈ X VIS and infrared modality data
+xIR
+0 ∈ X IR, and institutes an effective bidirectional mapping
+to ensure that the content of the source modality image cor-
+responds effectively to the translated target modality image,
+thereby achieving a stable training process.
+(1) Translation Direction Guidance (TDG). We first em-
+ploy an implicit input channel position encoding to deter-
+mine whether the data distribution being learned is from
+the infrared modality or the visible modality. Specifically,
+for the infrared-to-visible translation part, the input con-
+sists of three components: the noisy data q (xVIS
+t | xVIS
+0 ) ∈
+RH×W ×CVIS in the visible modality at time step t, the in-
+frared modality image data xIR
+0 ∈ RH×W ×CIR , and the edge
+feature maps E IR = DexiNed (xIR) ∈ RH×W ×E extracted
+from the infrared image using the edge detection network
+DexiNed (Soria et al. 2023). For the consistency of subse-
+quent operations, we duplicate the single-channel infrared
+image across three channels to match the visible format, en-
+suring CVIS = CIR = 3. Using edge feature maps extracted
+from infrared and visible images as part of the input prompt
+can ensure the consistency of the target image (Ren et al.
+2023). To construct the network input, we concatenate these
+data along the channel dimension, resulting in the following
+input representation:
+Z t
+IR-to-VIS = q (xVIS
+t | xVIS
+0 ) ⊕ xIR
+0 ⊕ E IR , (1)
+where Z t
+IR-to-VIS ∈ RH×W ×(CVIS+CIR+E), ⊕ denotes the con-
+catenation operation, with the target modality data, source
+modality data, and edge features corresponding to channel
+index ranges {1, 2, · · · , CVIS }, {CVIS +1, CVIS +2, · · · , CIR+
+CVIS }, and {CIR +CVIS +1, CIR +CVIS +2, · · · , CIR +CVIS +
+E}, respectively. This implicit channel encoding effectively
+distinguishes the data from different modalities without re-
+quiring explicit direction labels indicating the data source.
+Additionally, we introduce label embedding layersτϕ to pro-
+cess the translation direction labels, which represent: C IR
+corresponding to the image translation direction from vis-
+ible to infrared, learning the data distribution of the infrared
+modality.
+(2) Cross-modality Feature Control (CFC). To achieve
+effective target-modality image content control based on the
+source-modality image, in addition to the direct input of
+edge feature maps, we also train two independent U-Net en-
+coders, one serving as the infrared modality encoderZ IR
+E and
+the other as the visible modality encoder Z VIS
+E , to extract
+modality features Fd from the infrared or visible images.
+These modality features are then fed into the cross-attention
+layer of ZN to enhance the control of the target modality
+image content. The query Qi
+n, key K i
+n, and value V i
+n are
+computed as follows:
+Qi
+n = Conv i
+q
+ 
+F n
+gi
+
+, K i
+n, V i
+n = Conv i
+kv
+ 
+F n
+di
+
+, (2)
+where F n
+gi is the input vector obtained by flattening the
+noise feature map of the i-th cross-attention part in the n-
+th layer of network ZN , and F n
+di is the feature map extracted
+from the i-th part in the n-th layer of the modality encoder.
+Through the cross-modality attention mechanism, we com-
+pute the attention weights Ai and obtain the updated feature
+output F n
+gi+1:
+F n
+gi+1 = F n
+gi + sof tmax
+ 
+Qi
+n ·
+ 
+K i
+n
+T
+√
+d
+!
+· V i
+n. (3)
+(3) Modality Joint Learning Loss Function. Once the
+model effectively learns to capture the characteristics of
+both data distributions, we compute the noise prediction
+loss in each translation direction. Specifically, when the in-
+frared image provides guidance, the mean squared error
+(MSE) between the predicted noise in the noisy visible im-
+age and the true noise is calculated, yielding LIR-to-VIS . Con-
+versely,when the visible image provides guidance, the corre-
+sponding MSE is computed for the infrared image, resulting
+--- Page 4 ---
+Attention Block
+Concatenate
+Add
+Label
+Embedding
+Time
+Embedding
+(a) Bidirectional Diffusion Training (BDT) (b) Statistical Constraint Inference (SCI)
+Figure 2: Overview of CM-Diff. (a) Bidirectional Diffusion Training (BDT) : Learning domain-specific data distributions
+and establishing robust bidirectional mappings. (b) Statistical Constraint Inference (SCI) : Ensuring consistency between the
+statistical distributions of translated images and those in the training data.
+in LVIS-to-IR . The loss functions are defined as:
+LIR-to-VIS (ϕ) = Et1,xIR
+0 ,ϵ1
+hϵ1 − ϵϕ
+ 
+Z t1
+IR-to-VIS , J VIS , t1
+2
+2
+i
+LVIS-to-IR (ϕ) = Et2,xVIS
+0 ,ϵ2
+hϵ2 − ϵϕ
+ 
+Z t2
+VIS-to-IR , J IR , t2
+2
+2
+i
+,
+(4)
+where t1, t2
+i.i.d.
+∼ DiscreteUniform({1, · · · , T }), ϵ1, ϵ2
+i.i.d.
+∼
+N (0, I), J = τϕ (C) . The modality joint learning loss
+Ljoint is as follows:
+Ljoint (ϕ) = λIR-to-VIS · LIR-to-VIS + λVIS-to-IR · LVIS-to-IR . (5)
+Algorithm 1: CM-Diff Training
+Input: visible (VIS) image xVIS , infrared (IR) image
+xIR, infrared-to-visible direction label C IR, visible-to-
+infrared direction label C VIS .
+1: repeat
+2: xVIS ∈ X VIS , xIR ∈ X IR
+3: t1, t2
+i.i.d.
+∼ DiscreteUniform({1, · · · , T })
+4: ϵ1, ϵ2
+i.i.d.
+∼ N (0, I)
+5: xVIS
+t1 ←√¯αt1 · xVIS
+0 + √1 − ¯αt1 · ϵ1
+xIR
+t2 ←√¯αt2 · xIR
+0 + √1 − ¯αt2 · ϵ2
+6: J VIS ← τϕ(C VIS), J IR ← τϕ(C IR)
+7: E VIS ← DexiNed (xVIS
+0 ) , EIR ← DexiNed (xIR
+0 )
+8: Gradient descent step on:
+∇ϕ
+h
+λIR-to-VIS ·
+ϵ1 − ϵϕ
+ 
+Z t1
+IR-to-VIS , J VIS , t1
+2
+2
++λVIS-to-IR ·
+ϵ2 − ϵϕ
+ 
+Z t2
+VIS-to-IR , J IR , t2
+2
+2
+i
+9: until Converged
+Statistical Constraint Inference (SCI)
+Our statistical constraint inference (SCI) module aims to
+guide the IR→VIS generation toward semantically and ther-
+mally consistent outputs. Related ideas include Diffusion
+Posterior Sampling (DPS) (Chung et al. 2022), which con-
+strains diffusion inference via approximate posteriors. How-
+ever, SCI differs by using domain-specific statistics (e.g.,
+thermal variance) instead of learned masks or latent pri-
+ors, making it more suitable for infrared–visible translation
+where semantic cues are inherently weak.
+In order to enhance bidirectional diffusion inference with
+cross-modality statistical awareness, we propose Statistical
+Constraint Inference (SCI), which constrains the denois-
+ing trajectory using prior statistical properties derived from
+paired training data. The method consists of three com-
+ponents: (1) baseline inference, (2) constrained denoising
+using statistical priors, and (3) loss-guided gradient-based
+sampling.
+(1) Baseline Inference Formulation. To adapt the denois-
+ing diffusion process to our Bidirectional Diffusion Train-
+ing (BDT) framework, we reformulate the reverse transi-
+tions in each direction using conditional generative func-
+tions. Specifically, the denoising step is defined as:
+xVIS
+t−1 = µϕ
+ 
+Z t1
+IR-to-VIS , J VIS , t1
+
++ Σϕ
+ 
+Z t1
+IR-to-VIS , J VIS , t1
+
+ϵ1,
+xIR
+t−1 = µϕ
+ 
+Z t2
+VIS-to-IR , J IR , t2
+
++ Σϕ
+ 
+Z t2
+VIS-to-IR , J IR , t2
+
+ϵ2.
+(6)
+where Z t
+· denotes the latent embedding extracted from the
+conditional encoder at time step t along each direction, and
+J · represents modality-specific guidance such as edge or se-
+mantic priors. The functions µϕ(·) and Σϕ(·) produce the
+mean and variance of the denoising distribution at step t.
+This formulation allows both visible and infrared modal-
+ities to be reconstructed from Gaussian noise by iteratively
+incorporating the complementary information provided by
+the opposite modality. Unlike unidirectional DDPM, our
+bidirectional structure ensures mutual enhancement and ro-
+bust translation under strong structural constraints.
+(2) Statistical-Constrained Reverse Sampling. To en-
+hance semantic fidelity and statistical realism in generated
+--- Page 5 ---
+images, we incorporate domain-specific statistical priors
+into the reverse denoising process by modifying the stan-
+dard unconditional transition distribution pθ(xt−1 | xt) into
+a constrained form pθ(xt−1 | xt, w), where w encodes sta-
+tistical properties of the target domain, such as edge distri-
+butions or pixel-level histograms.
+Following the framework of classifier-free guidance
+(Dhariwal and Nichol 2021), the conditional distribution can
+be approximated as:
+log pθ(xt−1 | xt, w) = log(pθ(xt−1 | xt)p(w | xt)) + z1
+≈ log p (h) + z2, h ∼ N (µθ + gΣθ, Σθ) ,
+(7)
+where g = ∇xt log p (w | xt), z1 and z2 are constants.
+However, directly estimating p(w | xt) is unreliable
+because xt is corrupted by time-dependent noise. There-
+fore, inspired by (Ho, Jain, and Abbeel 2020), we introduce
+˜x0—an intermediate prediction of the clean image:
+˜x0 = 1√¯αt
+·
+ 
+xt −
+√
+1 − ¯αt · ϵθ(xt, t)
+
+. (8)
+This prediction captures more reliable semantic content than
+xt, and is used as a proxy for evaluating p(w | ˜x0).
+To construct a practical approximation of p(w | ˜x0), we
+define:
+p(w | ˜x0) = 1
+M exp {− [λQ · Q(˜x0, w) + λK · K(˜x0)]} ,
+(9)
+where Q(·) measures the distance between the statistics of
+˜x0 and the target domain (e.g., intensity histograms or edge
+maps), and K(·) is a regularization term that penalizes visual
+artifacts such as blur or noise. The scale parameters λQ and
+λK control the relative influence of each constraint.
+Accordingly, the gradient g becomes:
+∇˜x0 log p(w | ˜x0) = −λQ ·∇ ˜x0 Q(˜x0, w)−λK ·∇ ˜x0 K(˜x0).
+(10)
+By injecting the guidance termΣθ ·∇˜x0 log p(w | ˜x0) into
+the reverse process, we steer the denoising trajectory toward
+outputs that respect both structural fidelity and global statis-
+tical properties, while maintaining the stochastic integrity of
+the original diffusion model.
+Finally, the updated prediction ofxt−1 is derived from the
+posterior distribution:
+q (xt−1 | xt, ˜x0) = N (xt−1; µq (xt, ˜x0) , Σq (t)) ,
+µq (xt, ˜x0) = (1 − αt) · (1 − ¯αt−1) · xt + √¯αt−1 · βt · ˜x0
+1 − ¯αt
+,
+Σq (t) = (1 − αt) · (1 − ¯αt−1)
+1 − ¯αt
+· I.
+(11)
+The overall process of the SCI is presented in Fig. 2 (b).
+(3) Constraint Loss Function for Statistical Regula-
+tion. To implement the conditional term p(w | ˜x0)
+in our SCI framework, we define two differentiable
+losses— channel constraint loss Lccl and statistical con-
+straint loss Lscl—which correspond to K(·) and Q(·), re-
+spectively. These are combined into the overall constraint
+objective:
+Lcons = λccl · Lccl + λscl · Lscl. (12)
+Algorithm 2: CM-Diff Inference (Visible-to-Infrared)
+Input: Visible image xVIS
+0 , infrared-to-visible direction la-
+bel C IR.
+Output: Translated IR modality image ˆ xIR
+0
+1: Initialize a pre-trained edge detection network DexiNed
+2: xVIS
+0 ∈ X VIS , ˆ xIR
+T ∼ N (0, I)
+3: E VIS ← DexiNed (xVIS
+0 )
+4: J IR ← τϕ(C IR)
+5: for t = T, ..., 1 do
+6: µ, Σ = µϕ (ˆ xIR
+t ) , Σϕ (ˆ xIR
+t )
+7: ˜xIR
+0 = ˆ xIR
+t√¯αt
+−
+√1−¯αt·ϵϕ(ˆ xIR
+t ,xVIS
+0 ,E VIS ,J IR ,t)√¯αt
+8: Lcons = λscl · Lscl (˜xIR
+0 , w) + λccl · Lccl (˜xIR
+0 )
+9: Sample ˆ xIR
+t−1 by N
+ 
+µ + ∇˜xIR
+0 Lcons, Σ
+
+10: end for
+11: return ˆ xIR
+0
+Channel Constraint Loss. We penalize discrepancies in
+per-channel histograms between the noisy estimate ˜x0 and
+the empirical prior histograms from the target modality:
+Lccl =
+X
+δ∈{R,G,B}
+BX
+i=1
+ 
+hpred,δ
+i − hprior,δ
+i
+2
+hpred,δ
+i + hprior,δ
+i + ϵ
+, (13)
+where hpred,δ
+i and hprior,δ
+i are the i-th histogram bin counts of
+the predicted and prior distributions for channel δ, B is the
+number of bins, and ϵ=10 −6 avoids division by zero.
+Statistical Constraint Loss. To align the generated im-
+age’s first- and second-order channel statistics with the tar-
+get domain, we define:
+Lscl =
+X
+δ∈{R,G,B}
+µpred
+δ − µprior
+δ
+ +
+σpred
+δ − σprior
+δ
+, (14)
+where µpred
+δ , σpred
+δ are the mean and standard deviation of
+channel δ in ˜x0, and µprior
+δ , σprior
+δ are the corresponding em-
+pirical values from the training data.
+By backpropagating the gradients of Lcons into the re-
+verse sampling step, we adjust the denoising mean via
+µ ← µ + Σ · ∇˜x0 Lcons,
+thereby enforcing both histogram consistency and statistical
+alignment without modifying the original diffusion model
+parameters.
+The overall inference process using the SCI is presented
+in Algorithm 2.
+Experiments
+We conduct all our experiments on VEDAI (Razakarivony
+and Jurie 2016), A VIID (Han et al. 2023), and M 3FD (Liu
+et al. 2022) datasets to evaluate the performance of image
+translation methods.
+Comparison with State-of-the-Art Methods
+(1) Quantitative Results. The quantitative comparison re-
+sults are listed in Tab. 1. The evaluation metrics include
+--- Page 6 ---
+Table 1: Quantitative comparison of the CM-Diff with state-of-the-art methods. The best performance for each metric is high-
+lighted in bold, and the second-best scores are marked with underline fonts for reference.
+Method A VIID(infrared→visible) VEDAI(infrared→visible) M3FD(infrared→visible) A VIID(visible→infrared) VEDAI(visible→infrared) M3FD(visible→infrared)PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓T2V-DDPM (Nair and Patel 2023)22.03 0.7590.07463.4014.72 0.645 0.249 137.6511.35 0.373 0.421 144.5523.750.883 0.05023.8814.97 0.8350.122 54.0911.33 0.502 0.364 138.90CycleGAN (Zhu et al. 2017)19.58 0.521 0.185 45.3417.290.6710.223144.4615.02 0.5190.382 122.7718.58 0.452 0.272 87.1319.03 0.740 0.204 106.6514.42 0.396 0.378 113.75UNIT (Liu, Breuel, and Kautz 2017)23.02 0.702 0.140 59.6912.51 0.107 0.414 176.8313.96 0.421 0.396 136.6025.030.744 0.138 50.2013.86 0.194 0.405 175.2416.86 0.577 0.349 117.75MUNIT (Huang et al. 2018)23.340.694 0.141 48.3714.74 0.402 0.318 163.1413.06 0.370 0.450 144.6523.56 0.664 0.173 63.6619.25 0.528 0.10451.7615.86 0.549 0.374 126.22DCLGAN (Han et al. 2021)18.08 0.492 0.291 80.4614.73 0.502 0.297 176.1513.62 0.364 0.431 119.2817.31 0.424 0.333 93.5718.11 0.493 0.282 196.4412.99 0.440 0.474 191.5I2V-GAN (Li et al. 2021)15.23 0.403 0.378 134.9714.31 0.518 0.321 202.3912.47 0.391 0.447 179.0915.98 0.443 0.398 147.4919.33 0.664 0.230 143.9411.31 0.382 0.445 143.67ROMA (Yu et al. 2022)19.10 0.531 0.173 33.4712.88 0.128 0.629 250.6117.370.464 0.293 83.4619.83 0.541 0.193 40.3620.200.613 0.174 83.1719.000.6060.25175.96CUT (Park et al. 2020)14.14 0.338 0.460 122.7116.87 0.535 0.272 142.4515.21 0.401 0.371104.6618.78 0.486 0.270 76.7415.84 0.561 0.359 228.349.33 0.231 0.631 314.04Ours 23.67 0.835 0.054 22.8019.89 0.774 0.185 94.1117.030.554 0.184 66.1927.960.8710.05421.3324.03 0.883 0.096 46.1823.54 0.765 0.116 57.26
+Input CycleGAN T2V-DDPM MUNIT DLCGAN UNIT I2V-GAN CUT ROMA Ours Ground Truth
+Figure 3: Qualitative results of CM-Diff for the infrared-to-visible image translation task. The first row corresponds to the
+VEDAI dataset, the second row to the A VIID dataset, and the third row to the M3FD dataset.
+FID (Heusel et al. 2017), SSIM (Wang et al. 2004), LPIPS
+(Zhang et al. 2018a), and PSNR for both the infrared-to-
+visible image translation task and the visible-to-infrared im-
+age translation task. Overall, our method demonstrates su-
+perior performance compared to unidirectional and bidirec-
+tional modality translation methods.
+Compared to the DDPM-based method T2V-DDPM (Nair
+and Patel 2023), the proposed method achieves a 7.44%
+improvement in PSNR, along with a 64.04% reduction in
+FID for the infrared-to-visible image translation task on the
+A VIID dataset. On the M3FD dataset, the enhancements are
+also pronounced, with a 53.04% increase in PSNR and a
+56.29% reduction in LPIPS. This improvement stems from
+the limitations of diffusion-based unidirectional methods,
+which focus solely on learning the data distribution in the
+target modality and establishing mappings within it, thereby
+missing deeper semantic connections. In contrast, BDT can
+simultaneously learn the data distributions of both modali-
+ties. Additionally, the CFC is utilized to enhance the seman-
+tic guidance of the source modality image.
+Compared to GAN-based unidirectional translation meth-
+ods, our proposed method achieves improvements across the
+three datasets. On the A VIID dataset, for the infrared-to-
+visible image translation task, FID decreases by 72.20% and
+PSNR increases by 48.88% compared to CUT (Park et al.
+2020), while FID decreases by 31.88% and PSNR increases
+by 23.93% compared to ROMA (Yu et al. 2022). This im-
+provement can be attributed to the proposed DDPM-based
+method, which transforms the data distribution into a series
+of noise distributions to avoid the problem of mode collapse.
+Additionally, it employs SCI during the sampling phase
+to incorporate observed statistical information, thereby im-
+proving the consistency between the generated results and
+the real data distribution.
+Compared to GAN-based bidirectional translation meth-
+ods, our proposed method also demonstrates performance
+gains. On the A VIID dataset, for the infrared-to-visible im-
+age translation task, PSNR increases by 1.41% compared
+to MUNIT (Huang et al. 2018). The observed improvement
+can be ascribed to the adoption of a BDT, which effec-
+tively encodes directional embeddings and edge information
+while leveraging multi-scale features extracted by the source
+modality encoder. This method mitigates modality distribu-
+tion ambiguity arising from the structural and semantic sim-
+ilarities between infrared and visible images.
+(2) Qualitative Results. We compare the infrared-to-
+visible (Fig. 3) and visible-to-infrared (Fig. 4) translation
+results of state-of-the-art methods with our approach. In
+the first row, using the VEDAI dataset, we observe that all
+methods transfer semantic information well, but our method
+outperforms DCLGAN (Han et al. 2021) and UNIT (Liu,
+Breuel, and Kautz 2017) in terms of color and detail. This
+is due to the limitations of DCLGAN and UNIT in accu-
+rately defining object boundaries and utilizing spatial infor-
+mation. In the second row, methods like CycleGAN (Zhu
+et al. 2017), MUNIT (Huang et al. 2018), and ROMA (Yu
+et al. 2022) produce blurred or distorted objects. While CUT
+(Park et al. 2020), T2V-DDPM (Nair and Patel 2023), and
+our method generate clearer object structures, our method
+stands out by improving color fidelity through inference
+guidance with the SCI. The third row shows challenging
+--- Page 7 ---
+Input CycleGAN T2V-DDPM MUNIT DLCGAN UNIT I2V-GAN CUT ROMA Ours Ground Truth
+Figure 4: Qualitative results of CM-Diff for the visible-to-infrared image translation task. The first row corresponds to the
+VEDAI dataset, the second row to the A VIID dataset, and the third row to the M3FD dataset.
+samples with complex backgrounds and pedestrians. Meth-
+ods like T2V-DDPM and CUT tend to mistakenly ren-
+der background buildings as sky. In contrast, our method
+accurately reconstructs architectural details and sky back-
+grounds, thanks to the CFC module that ensures precise fea-
+ture generation and noise control.
+Ablation Study
+(1) Effect of CFC. We conducted ablation experiments to
+demonstrate the effectiveness of the source modality fea-
+tures and edge feature map cues in preserving content con-
+sistency in translation results. The quantitative results are
+presented in Tab. 2. It can be observed that the removal of
+the modality encoders and the edge detection part leads to a
+notable drop in the overall performance in both translation
+directions. We can see that external control using modality
+and edge features can effectively help the network distin-
+guish boundaries of objects in the image.
+Table 2: Effect of CFC.
+CFC infrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+w/o 19.17 0.761 0.201 101.13 24.05 0.880 0.098 47.84w/ 19.89 0.774 0.185 94.11 24.06 0.883 0.096 46.18
+(2) Effect of TDG. In Tab. 3, we investigate the impact
+of TDG on the quality of translation results for the two di-
+rections. When direction labels are passed through the label
+embedding layer and used to guide the network, the PSNR
+and SSIM metrics for the infrared-to-visible image transla-
+tion task improve by 7.16% and 6.91%, respectively. Simi-
+larly, for the visible-to-infrared translation task, these met-
+rics increase by 5.29% and 14.52%, respectively. These re-
+sults demonstrate that TDG is indispensable during training,
+as it helps the model recognize noisy data and provide cru-
+cial guidance. Moreover, during inference, the TDG corre-
+sponds to assisting the model in executing the correct trans-
+lation direction, further highlighting its importance.
+Table 3: Effect of TDG.
+TDG infrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+w/o 18.56 0.724 0.253 142.79 22.85 0.771 0.181 163.87w/ 19.89 0.774 0.185 94.11 24.06 0.883 0.096 46.18
+(3) Effect of SCI. As listed in Tab. 4, in the infrared-to-
+visible image translation task, the Lscl plays a significant
+role in enhancing modality translation performance, result-
+ing in an improvement of 5.85% in PSNR and 1.57% in
+SSIM compared to the case without SCI. In the visible-to-
+infrared image translation task, it results in an improvement
+of 52.70% in PSNR, 5.87% in SSIM, 26.15% in LPIPS, and
+19.97% in FID. Moreover, in the visible-to-infrared image
+translation task, incorporating the Lccl further boosts the
+model’s performance, leading to an improvement of 0.16%
+in PSNR and 0.21% in FID.
+Table 4: Effect of SCI.
+Lccl Lscl infrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+× × 18.78 0.762 0.205 105.0215.73 0.834 0.130 57.83× ✓ 19.88 0.774 0.185 93.65 24.02 0.883 0.096 46.28✓ × 19.54 0.775 0.201 97.39 15.64 0.840 0.129 56.88✓ ✓ 19.89 0.774 0.185 94.11 24.06 0.883 0.096 46.18
+Conclusion
+This paper introduces CM-Diff, a unified framework that uti-
+lizes DDPM for bidirectional translation between infrared
+and visible images. Our approach leverages the diffusion
+model and incorporates a Bidirectional Diffusion Training
+(BDT) to distinguish and learn modality-specific data dis-
+tributions while establishing robust bidirectional mappings.
+We have also proposed a Statistical Constraint Inference
+(SCI) for maintaining consistency between the statistical
+distributions of the translated images and training images.
+Extensive experiments have shown the effectiveness of our
+method.
+--- Page 8 ---
+CM-Diff: A Single Generative Network for Bidirectional Cross-Modality Translation Diffusion
+Model Between Infrared and Visible Images (Supplementary Material)
+Section A evaluates the effectiveness of the proposed Statis-
+tical Constraint Inference (SCI) strategy through pixel inten-
+sity frequency histogram analysis. The results demonstrate
+that SCI enhances infrared-to-visible translation by effec-
+tively suppressing unnatural color artifacts and aligning the
+translated image distributions with those of the ground truth.
+Details of the CM-Diff architecture are also provided, in-
+cluding the Translation Direction Guidance (TDG), Cross-
+Modality Feature Control (CFC), and SCI modules.
+Section B presents a comprehensive performance evalu-
+ation of cross-modality translation methods on object de-
+tection tasks using CFINet on the VEDAI dataset. Exper-
+imental results indicate that CM-Diff consistently outper-
+forms state-of-the-art approaches such as ROMA and CUT
+in both infrared-to-visible and visible-to-infrared directions,
+achieving superior mAP scores. Moreover, translation ex-
+periments conducted on the Rain100H dataset further val-
+idate the model’s generalization capability beyond the IR-
+VIS domain.
+Section C presents ablation and comparison studies that
+validate the effectiveness of key components in CM-Diff.
+Varying the constraint scale factors λccl and λscl shows that
+moderate values (e.g., 20) offer the best balance between fi-
+delity and diversity. Among the tested histogram distance
+metrics, χ2 achieves the lowest FID and best perceptual
+quality. For structural guidance, DexiNed outperforms tradi-
+tional edge detectors by better preserving semantic contours.
+Finally, comparisons with general I2I methods (UGATIT,
+UNSB, DDBM) highlight CM-Diff’s superior performance
+in cross-modality alignment, confirming the importance of
+domain-specific design.
+Section D provides qualitative results on the M 3FD,
+A VIID, and VEDAI datasets, illustrating the robustness of
+CM-Diff across a variety of challenging scenes. Analysis
+of training losses reveals that IR-to-VIS translation presents
+relatively lower optimization difficulty. Additional imple-
+mentation details are also included, such as the use of a
+U-Net backbone with multi-scale attention, DexiNed-based
+edge fusion, and AdamW optimization. Evaluation met-
+rics including FID, SSIM, LPIPS, and PSNR are discussed,
+along with detailed descriptions of the datasets used in the
+experiments.
+A. Method and Module Analysis
+Overall Framework
+Figure 7 depicts the complete CM-Diff architecture, which
+comprises three core components:
+(1) Translation Direction Guidance (TDG): steers the dif-
+fusion noise prediction toward the reverse gradient of the
+target modality;
+(2) Cross-Modality Feature Control (CFC) : injects se-
+mantic information across modalities at multiple feature
+scales to ensure content consistency;
+(3) Statistical Constraint Inference (SCI) : applies
+histogram-based statistical constraints ( Lccl, Lscl) during
+Table 5: Quantitative evaluation of visible-to-infrared im-
+age translation performance of various translation methods
+based on CFINet.
+Method P R mAP50 mAP75 mAP
+ROMA (Yu et al. 2022)0.133 0.027 0.036 0.022 0.012
+CUT (Park et al. 2020)0.418 0.157 0.187 0.159 0.082
+I2V-GAN (Li et al. 2021)0.379 0.113 0.179 0.144 0.077
+Ground Truth 0.471 0.368 0.449 0.306 0.168
+Ours 0.313 0.198 0.281 0.249 0.138
+sampling to reduce distribution shift.
+SCI Module Deep Dive and Analysis
+The SCI design draws inspiration from guided diffusion and
+distribution alignment techniques. By adjusting the mean
+and covariance of the target modality in the noise steps, it
+enforces closer adherence to the true data distribution. His-
+togram comparisons in Figures 5 and 6 confirm SCI’s effi-
+cacy for bidirectional infrared–visible translation.
+As illustrated in Fig. 5, the proposed Statistical Con-
+straint Inference (SCI) strategy introduces significant im-
+provements in the infrared-to-visible image translation task.
+Specifically, when employing SCI, the frequency distribu-
+tions of pixel intensities for each RGB channel shift no-
+tably towards lower intensity values. This shift is particu-
+larly evident in the green and blue channels, where high-
+frequency components associated with unnatural intensity
+peaks are substantially suppressed. As a result, the occur-
+rence of color artifacts—such as oversaturation or unnatural
+hues—is greatly reduced in the translated visible images.
+The effectiveness of SCI is further validated in the re-
+verse translation task, i.e., visible-to-infrared conversion.
+As shown in Fig. 6, the translated infrared images exhibit
+histogram distributions that are more consistent with those
+of the ground truth infrared images when SCI is applied.
+This consistency reflects a more faithful preservation of
+modality-specific statistical properties during translation.
+Overall, these observations highlight the advantage of
+integrating SCI into our framework. By enforcing statisti-
+cal alignment between the translated output and the target
+domain, SCI not only improves the perceptual realism of
+the results but also mitigates the color distribution anoma-
+lies typically introduced by Bidirectional Diffusion Train-
+ing (BDT). Consequently, the proposed CM-Diff model,
+when guided by SCI, demonstrates superior capability in
+performing high-fidelity, artifact-free cross-modality trans-
+lation within a unified generative framework.
+B. Performance Evaluation and Expandability
+Generated Data Efficacy in Object Detection
+We employ the recent small object detection method,
+CFINet (Yuan et al. 2023), and train it separately on infrared
+and visible data using the VEDAI dataset. Various transla-
+tion methods are utilized to perform infrared-to-visible and
+--- Page 9 ---
+0 50 100 150 200 250
+Pixel Intensity
+0.0000
+0.0025
+0.0050
+0.0075
+0.0100
+0.0125
+0.0150
+0.0175Normalized Frequency
+Red Channel Histogram
+SCI
+No SCI
+Ground Truth
+0 50 100 150 200 250
+Pixel Intensity
+0.000
+0.005
+0.010
+0.015
+0.020Normalized Frequency
+Green Channel Histogram
+SCI
+No SCI
+Ground Truth
+0 50 100 150 200 250
+Pixel Intensity
+0.000
+0.005
+0.010
+0.015
+0.020Normalized Frequency
+Blue Channel Histogram
+SCI
+No SCI
+Ground Truth
+Figure 5: Comparison of histograms for each channel of visible images. The distribution of the images obtained using SCI,
+without SCI, and the ground truth visible images are presented.
+0 50 100 150 200 250
+Pixel Intensity
+0.000
+0.005
+0.010
+0.015
+0.020
+0.025Normalized Frequency
+Histogram Comparison (Single Channel)
+SCI Method
+No SCI Method
+Ground Truth
+Figure 6: Comparison of histograms for infrared images.
+The distribution of the images obtained using SCI, without
+SCI, and the ground truth visible images are presented.
+visible-to-infrared modality translation. The translation re-
+sults are then evaluated using CFINet . For comparison, we
+selected several high-performing modality translation meth-
+ods, including ROMA (Yu et al. 2022), CUT (Park et al.
+2020), and I2V-GAN (Li et al. 2021). The quantitative re-
+sults for the infrared and visible modalities are shown in Ta-
+bles 5 and 6, respectively.
+In the comparison of infrared modality translation results,
+significant differences can be observed in terms of preci-
+sion (P), recall (R), and mean average precision (mAP).
+As shown in the table, the Ground Truth achieves the best
+performance, with the highest precision (0.471) and re-
+call (0.368). It also attains the highest mAP values, in-
+cluding mAP 50 = 0.449, mAP 75 = 0.306, and an overall
+mAP of 0.168. Among the modality translation methods,
+our approach demonstrates the best performance, achieving
+mAP50, mAP 75, and overall mAP values of 0.281, 0.249,
+Table 6: Quantitative evaluation of infrared-to-visible im-
+age translation performance of various translation methods
+based on CFINet.
+Method P R mAP50 mAP75 mAP
+ROMA (Yu et al. 2022)0.240 0.106 0.175 0.136 0.072
+CUT (Park et al. 2020)0.185 0.025 0.068 0.059 0.032
+I2V-GAN (Li et al. 2021)0.168 0.079 0.129 0.090 0.048
+Ground Truth 0.237 0.179 0.386 0.217 0.121
+Ours 0.241 0.165 0.265 0.206 0.105
+and 0.138, respectively. These results are significantly su-
+perior to those of ROMA, CUT, and I2V-GAN. Addition-
+ally, our method exhibits a recall of 0.198, which is substan-
+tially higher than that of other approaches, indicating its ef-
+fectiveness in the object detection task. Regarding the other
+modality translation methods, CUT and I2V-GAN perform
+similarly in terms of precision and mAP, though CUT con-
+sistently achieves slightly better results. In contrast, ROMA
+exhibits the weakest performance across all metrics, sug-
+gesting that its translated infrared images contribute mini-
+mally to the detection task. In summary, our method gen-
+erates higher-quality infrared images and substantially im-
+proves the performance of object detection tasks.
+In the comparison of visible modality translation results ,
+significant differences can be observed in terms of preci-
+sion (P), recall (R), and mean average precision (mAP).
+As shown in the table, the Ground Truth achieves the best
+performance, with relatively high precision (0.237) and re-
+call (0.179). It also attains the highest mAP values, includ-
+ing mAP50 = 0.386, mAP 75 = 0.217, and an overall mAP
+of 0.121. Among the modality translation methods, our ap-
+proach demonstrates superior performance compared to oth-
+ers. Specifically, it achieves mAP 50, mAP 75, and overall
+mAP values of 0.265, 0.206, and 0.105, respectively, signif-
+icantly outperforming ROMA, CUT, and I2V-GAN. Addi-
+tionally, our method exhibits a recall of 0.165, second only
+to the Ground Truth, indicating its effectiveness in the ob-
+ject detection task under the visible modality. Regarding
+--- Page 10 ---
+ResBlock×3   C=64
+ResBlock×3   C=128
+ResBlock×3   C=128
+ResBlock×3   C=256
+Attention Block
+ResBlock×3   C=256
+Attention Block
+ResBlock×3   C=512
+Concatenation
+ResBlock×3   C=256
+Concatenation
+Attention Block
+ResBlock×3   C=128
+Concatenation
+ResBlock×3   C=128
+Concatenation
+ResBlock×3   C=64
+ResBlock×3   C=512
+Extraction Block (ResBlock×3   C=128)
+ResBlock×3   C=512
+Attention Block
+ResBlock×3   C=512
+Concatenation
+Attention Block
+ResBlock×3   C=256
+Concatenation
+Attention Block
+ResBlock×3   C=256
+ResBlock×3 C=256
+ResBlock×3   C=512
+Direction Label
+Lebel Embedding
+Time Embedding
+Time Step
+Feature Representation Feature Reconstruction
+Cross-modality 
+Feature Control
+Translation 
+Direction Guidance
+LayerNorm
+LN-SiLu Block
+SiLu
+SiLu
+Embedding Block
+FC-C-2C
+LN-SiLu Block
+Upsample/Downsample
+ResBlockK3-S1-2C/C
+K3-S1-2C/C
+LN-SiLu Block
+Embedding Block
+Muti-head Attention
+FC
+-
+1
+-
+1
+Q
+ V
+K
+GroupNormGroupNorm
+Attention Block
+Noisy image feature
+Condition image feature
+Embedding Feature
+Input Output
+Figure 7: CM-Diff Architecture: Comprising Cross-Modality Feature Control (CFC), Translation Direction Guidance (TDG),
+and the Feature Representation and Reconstruction Network. CM-Diff processing a noisy input image by integrating edge
+feature maps and conditional modality images. CFC aligning noise translation with the reverse direction of semantic content
+in the conditional modality. TDG guiding the predicted noise toward the expected modality’s reverse direction. Finally, the
+network predicting the output noise.
+other translation methods, ROMA performs relatively well
+in terms of precision and mAP but has a lower recall (0.106)
+compared to our model. CUT and I2V-GAN demonstrate
+weaker overall performance, with CUT exhibiting the lowest
+scores across all metrics, suggesting that its translated visi-
+ble images are of lower quality and less beneficial for object
+detection tasks. In summary, our method generates higher-
+quality visible images and achieves superior performance in
+object detection tasks.
+Finally, we observe that the quality of our infrared trans-
+lation results is superior to that of visible translation re-
+sults, both in terms of translation quality and object detec-
+tion task performance. This observation is also supported
+by the training loss depicted in Fig. 12, where the loss for
+visible-to-infrared translation is consistently lower than that
+for infrared-to-visible translation. This phenomenon can be
+attributed to the inherent characteristics of infrared and vis-
+ible images. Specifically, visible images consist of three
+channels representing the intensity values of red, green, and
+blue, whereas infrared images contain only a single channel
+reflecting infrared radiation intensity.
+Applicability to Weather Translation task
+As shown in Tab. 7. We directly applied our approach to a
+weather translation task without any architectural modifica-
+Table 7: Comparison of different methods on the Rain100H
+weather translation task.
+Method Rain→Sunny Sunny→Rain
+PSNR↑ SSIM↑ PSNR↑ SSIM↑
+CM-Diff (ours) 19.72 0.771 19.81 0.803
+SEMI (Wei et al. 2019) 16.56 0.486 / /
+DA-CLIP(Luo et al. 2023)33.91 0.926 / /
+tion and achieved competitive performance on the Rain100H
+dataset (Yang et al. 2017), which consists of 100 pairs of
+synthetic rainy and clean images commonly used for image
+deraining. This result demonstrates the generalization capa-
+bility of our method beyond the IR–VIS domain.
+C. Ablation and Comparison Studies
+Analysis of the Constraint Scale Factor
+To evaluate the effectiveness of constraint-based guidance in
+our generative framework, we conducted a series of ablation
+experiments focusing on the constraint scale factorsλccl and
+λscl. As presented in Table 8, we systematically varied these
+parameters and assessed the corresponding impact on cross-
+modality translation performance using standard evaluation
+metrics including PSNR, SSIM, LPIPS, and FID.
+--- Page 11 ---
+The results demonstrate a clear performance trend: as
+the constraint scale factors increased, the network exhibited
+consistent improvements across all metrics. This indicates
+that stronger enforcement of content and structure consis-
+tency enhances the model’s capacity to preserve semantic
+information and spatial alignment during translation. Specif-
+ically, setting λccl = λscl = 20 yielded the best overall
+performance, achieving the highest PSNR score of 19.89
+and LPIPS score of 0.185 in the infrared-to-visible trans-
+lation task, as well as the highest SSIM score of 0.883 in the
+visible-to-infrared task.
+However, further increasing the constraint values beyond
+this optimal point (e.g., λ = 40 and λ = 60 ) resulted
+in a slight degradation of performance. For instance, when
+increasing the scale from 40 to 60, the visible-to-infrared
+translation task experienced a marginal drop of 0.12% in
+PSNR and 0.11% in LPIPS. This decline is attributed to the
+over-constraint of the mean estimation in the diffusion sam-
+pling process, which likely suppresses the model’s flexibil-
+ity in modeling local uncertainty and fine-grained variations.
+These findings suggest that while constraint-based guidance
+is beneficial, excessive enforcement may hinder the genera-
+tive diversity required for high-fidelity modality translation.
+Table 8: Effect of the Constraint Scale Factors. The best per-
+formance for each metric is highlighted in bold.
+λccl, λscl infrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+0 18.78 0.762 0.205 105.02 15.73 0.834 0.130 57.8310 19.88 0.775 0.186 93.66 22.78 0.879 0.099 47.1820 19.89 0.774 0.185 94.11 24.06 0.883 0.096 46.1840 19.85 0.774 0.185 93.74 24.13 0.883 0.095 46.0160 19.84 0.774 0.185 93.68 24.10 0.883 0.096 45.98
+Histogram Distance Selection
+To enforce statistical alignment between generated and tar-
+get domains, we evaluate three histogram distance mea-
+sures—Euclidean, Bhattacharyya, and χ2—within the Sta-
+tistical Constraint Inference framework (Table 9). All
+metrics achieve comparable PSNR and LPIPS for in-
+frared→visible translation and similar SSIM for visi-
+ble→infrared translation, indicating their baseline effective-
+ness in distribution matching. Notably:
+• Euclidean distance attains the highest PSNR (24.08 dB)
+and lowest LPIPS (0.095) for IR →VIS, but exhibits a
+higher FID (46.75), suggesting marginally inferior deep-
+feature congruence.
+• Bhattacharyya distance yields PSNR and LPIPS on par
+with Euclidean for IR →VIS and slightly improves FID
+to 46.71, yet offers no significant benefit for VIS→IR.
+• χ2 distance (proposed) incurs only a minor PSNR
+(–0.05 dB) and LPIPS (+0.001) penalty relative to Eu-
+clidean in IR →VIS, while achieving the lowest FID
+scores in both directions (46.18 for IR →VIS and 94.11
+for VIS →IR). This reflects its enhanced sensitivity to
+sparse but extreme discrepancies in pixel-intensity his-
+Table 9: Performance comparison of different histogram dis-
+tance metrics in SCI for bidirectional IR-VIS translation.
+Histogram Distanceinfrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+Euclidean 24.08 0.882 0.09546.7519.88 0.774 0.18594.43Bhattacharyya24.08 0.882 0.096 46.7119.88 0.774 0.18594.45Chi2 (ours) 24.03 0.883 0.09646.1819.89 0.774 0.185 94.11
+Table 10: Comparison of edge detectors for bidirectional IR-
+VIS translation.
+Edge Detector infrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+Sobel 23.64 0.774 0.109 54.8816.90 0.563 0.180 63.14Canny 21.70 0.729 0.142 64.1116.51 0.537 0.199 67.77DexiNed (ours)24.03 0.883 0.096 46.1819.89 0.774 0.185 94.11
+tograms, yielding crisper and more artifact-free transla-
+tions.
+Consequently, the χ2 metric provides the optimal com-
+promise between pixel-level fidelity and perceptual realism
+and is therefore adopted as the default histogram distance.
+Edge Detector Selection and Justification
+Effective cross-modality feature integration hinges on robust
+structural priors. Conventional detectors such as Sobel and
+Canny employ fixed convolutional kernels to infer gradients,
+but their performance deteriorates in low-contrast or noisy
+infrared imagery. To overcome these limitations, we inte-
+grate DexiNed, a deep learning–based edge extractor opti-
+mized for semantic contour delineation and fine-grained de-
+tail preservation across heterogeneous visual conditions.
+As shown in Table 10, DexiNed consistently outperforms
+both Sobel and Canny for bidirectional translation tasks.
+In the infrared →visible direction, DexiNed attains a su-
+perior PSNR of 24.03 dB and SSIM of 0.883, alongside
+the lowest LPIPS (0.096) and FID (46.18). Similarly, for
+visible→infrared translation, DexiNed achieves the highest
+PSNR (19.89 dB) and SSIM (0.774) while delivering com-
+petitive LPIPS and FID metrics. These quantitative improve-
+ments corroborate that DexiNed’s learned edge represen-
+tations furnish more reliable and semantically meaningful
+guidance, thereby enhancing both pixel-level accuracy and
+perceptual fidelity without incurring substantial computa-
+tional overhead.
+Positioning Against General Image-to-Image
+Translation Methods
+General-purpose I2I models, optimized for RGB–to–RGB
+mappings, are ill-equipped to reconcile the substantial spec-
+tral and statistical disparities inherent in IR–VIS translation.
+As reported in Table 11, UGATIT (Kim et al. 2019) and
+UNSB (Kim et al. 2023) achieve only PSNR = 17.86 dB
+/ 11.99 dB and SSIM = 0.602 / 0.415 for IR →VIS, with
+LPIPS = 0.358 / 0.433 and FID = 149.46 / 128.56, respec-
+tively—results that reflect both poor structural fidelity and
+perceptual realism. Even DDBM (Zhou et al. 2023), despite
+delivering a high PSNR of 26.26 dB, suffers from an exces-
+sively large FID of 227.34, indicating severe deep-feature
+--- Page 12 ---
+Visible-to-InfraredInfrared-to-Visible
+True Visible
+ True Infrared
+Figure 8: Modality translation results on the M 3FD dataset. The first row represents real infrared images, the second and third
+rows show generated infrared and visible images, respectively, and the fourth row represents real visible images.
+Table 11: Performances of Different Methods on VEDAI.
+Histogram Distanceinfrared→visible visible→infraredPSNR↑ SSIM↑ LPIPS↓ FID↓ PSNR↑ SSIM↑ LPIPS↓ FID↓
+UGATIT (ICLR’20)17.86 0.602 0.358 149.4616.18 0.461 0.379 133.98UNSB (ICLR’24)11.99 0.415 0.433 128.5614.71 0.408 0.475 148.98DDBM (ICLR’24)26.260.748 0.405 227.3422.26 0.5670.526 241.35CM-Diff (ours)23.540.765 0.116 57.2617.03 0.5540.184 66.19
+mismatches. By contrast, CM-Diff attains a well-balanced
+performance (PSNR = 23.54 dB, SSIM = 0.765, LPIPS =
+0.116, FID = 57.26 for IR →VIS), and maintains competi-
+tive metrics for VIS→IR (PSNR = 17.03 dB, SSIM = 0.554,
+LPIPS = 0.184, FID = 66.19). These quantitative contrasts
+confirm that our modality-specific bidirectional diffusion
+framework and statistical constraint inference are critical to
+bridging the IR–VIS domain gap. Consequently, we exclude
+general I2I baselines from the main text to preserve focus on
+specialized IR–VIS comparisons, relegating their evaluation
+to this supplementary section.
+D. Qualitative Results and Experimental Setup
+Additional Translation Examples
+As illustrated in Figs. 8, 9, and 10, we provide addi-
+tional qualitative results on the M 3FD, A VIID, and VEDAI
+datasets to further validate the effectiveness and generaliz-
+ability of our proposed method. Each figure showcases rep-
+resentative samples drawn from diverse scenarios.
+In these figures, the first row displays the original in-
+frared images, while the fourth row presents the correspond-
+ing visible images. The second and third rows illustrate the
+translated results obtained using the visible-to-infrared and
+infrared-to-visible translation pathways, respectively. The
+input conditions and their corresponding outputs are aligned
+vertically to facilitate clear comparison.
+These samples cover a wide range of complex outdoor
+environments, including urban streets, residential areas,
+forested regions, wilderness scenes, and water bodies such
+as lakes and rivers. Despite significant variability in light-
+ing conditions, object scales, textures, and background com-
+plexity, our method—CM-Diff—consistently generates vi-
+sually coherent and semantically aligned translations across
+both modalities.
+The results confirm that CM-Diff exhibits robust cross-
+modality translation capabilities, maintaining structural con-
+sistency and minimizing color distortion even in challeng-
+ing real-world scenarios. This highlights the model’s strong
+adaptability and potential for deployment in practical aerial
+sensing and remote vision applications.
+Ablation Visualizations
+To further investigate the contribution of each novel compo-
+nent in our proposed framework, we present qualitative re-
+sults from a series of ablation experiments conducted on the
+VEDAI (Razakarivony and Jurie 2016) dataset. These exper-
+--- Page 13 ---
+Visible-to-InfraredInfrared-to-VisibleTrue Visible True Infrared
+Figure 9: Modality translation results on the A VIID dataset. The first row represents real infrared images, the second and third
+rows show generated infrared and visible images, respectively, and the fourth row represents real visible images.
+iments cover both infrared-to-visible and visible-to-infrared
+image translation tasks. As illustrated in Fig. 11, each col-
+umn corresponds to a different model variant, allowing for
+direct visual comparison of the impact of specific design
+choices.
+Notably, the translated results shown in the second,
+fourth, and fifth columns exhibit clear color distortions and
+unnatural artifacts. These models lack the statistical guid-
+ance provided by our proposed constraint mechanism, and
+consequently, fail to properly regulate the sampling process
+during generation. This often leads to aberrant color distri-
+bution or poor semantic alignment with the target domain.
+Such visual artifacts are especially pronounced in high-
+frequency regions, indicating the importance of statistical
+consistency in maintaining photorealistic quality.
+In contrast, the results shown in the seventh column of
+Fig. 11 correspond to our full model, which integrates both
+the cross-modality feature interaction mechanism and the
+statistical constraint inference (SCI) strategy. These im-
+ages display enhanced color realism, better-preserved ob-
+ject boundaries, and overall superior visual fidelity—closely
+resembling the ground-truth visible and infrared images.
+Moreover, the reduced blurriness and clearer contours in
+these results also validate the effectiveness of incorporating
+direction label guidance, which facilitates more targeted and
+stable translation between the two modalities.
+Together, these observations underscore the neces-
+sity of combining feature-level cross-modality control,
+distribution-level statistical constraint, and direction-aware
+supervision to achieve high-quality and consistent image
+translation in both directions.
+Implementation Details
+To effectively integrate feature information across infrared
+and visible modalities, we incorporate a cross-modality at-
+tention mechanism at multiple resolutions within both the
+encoder and decoder pathways of a U-Net backbone. Specif-
+ically, attention modules with 64 channels are applied at fea-
+ture map resolutions of8 ×8, 16 ×16, and 32 ×32, enabling
+rich feature interaction across modalities at various seman-
+tic levels. To further enhance edge-awareness, we utilize a
+pre-trained DexiNed model to extract fine-grained edge in-
+formation from both infrared and visible inputs. These edge
+maps are fused into the main network to improve structural
+detail preservation in the final output.
+All input images are uniformly resized to a resolution of
+256 ×256 for both training and evaluation. The U-Net back-
+bone is configured with a base channel width of 128 across
+all datasets. Training is conducted using the AdamW opti-
+mizer with a batch size of 6. The learning rate is initial-
+ized to 1 × 10−4 and decayed multiplicatively by a factor
+of 0.9 every 2,000 iterations. The total training procedure
+spans 100,000 iterations.
+To improve the fidelity of the generation process, we mod-
+--- Page 14 ---
+Visible-to-InfraredInfrared-to-VisibleTrue Visible True Infrared
+Figure 10: Modality translation results on the VEDAI dataset. The first row represents real infrared images, the second and
+third rows show generated infrared and visible images, respectively, and the fourth row represents real visible images.
+Input w/o SCI+CFC w/o CFC w/o SCI w/o ℒ𝑠𝑠𝑠𝑠𝑠𝑠 w/o ℒ𝑠𝑠𝑠𝑠𝑠𝑠w/o TDG Ours Ground Truth
+Figure 11: Comparisons of different ablation studies for the visible-to-infrared image translation task. We evaluate the impact
+of the Statistical Constraint Inference (SCI), which consists of Lccl and Lscl, the Cross-modality Feature Control (CFC) com-
+ponent, and the translation direction guidance (TDG).
+ify the original noise schedule by reducing the final noise
+variance βT from 0.02 to 0.01, effectively lowering the
+amount of noise injected during diffusion and thereby reduc-
+ing degradation artifacts. The revised noise schedule linearly
+increases βt from β1 = 0.0001 to βT = 0.01.
+Given the symmetric nature of modality translation be-
+tween infrared and visible domains, we set both transla-
+tion loss weights equally as λIR→VIS = λVIS →IR = 1 .0,
+even though the infrared modality typically presents a lower
+learning difficulty. During the generative phase, we adopt
+two constraint-based guidance terms: a content-consistency
+loss (λccl = 20 .0) and a structure-consistency loss ( λscl =
+20.0), both of which help to maintain semantic alignment
+and spatial coherence across modalities.
+All experiments are conducted on a computing platform
+equipped with an Intel(R) Xeon(R) CPU E5-2698 v4 @
+2.20GHz and four NVIDIA V100 GPUs.
+Metrics
+To objectively assess the performance of our proposed
+method on cross-modality image translation tasks, we adopt
+four widely used image quality assessment metrics: Frechet
+--- Page 15 ---
+Number of training iterations
+Training Loss Value
+Joint Domain Learning Loss
+Infrared-to-Visible Loss
+Visible-to-Infrared Loss
+Figure 12: The training loss evolves with the number of iterations. Due to the significant fluctuations in the loss values of
+individual iterations, which make it challenging to discern overall trends, we instead utilize the average loss value over an entire
+training epoch and use the iteration count as the horizontal axis.
+Inception Distance (FID), Structural Similarity Index Mea-
+sure (SSIM), Learned Perceptual Image Patch Similarity
+(LPIPS), and Peak Signal-to-Noise Ratio (PSNR). These
+metrics provide a comprehensive evaluation from both per-
+ceptual and pixel-level perspectives.
+Frechet Inception Distance (FID) (Heusel et al. 2017)
+quantifies the distance between the feature distributions of
+real and generated images. Lower FID scores indicate higher
+similarity between the generated and real image domains in
+terms of deep features. It is defined as:
+FID(v′, v) = ∥µv − µv′∥2 + tr(Σv + Σv′ − 2(Σv · Σv′)1/2),
+(15)
+where µv and µv′ are the mean feature vectors of real and
+generated images, respectively, and Σv and Σv′ are the cor-
+responding covariance matrices. These features are extracted
+using a pre-trained Inception-V3 network.
+Structural Similarity Index Measure (SSIM) (Wang et al.
+2004) evaluates the similarity between the translated and
+ground-truth images based on luminance, contrast, and
+structural information. SSIM values range from 0 to 1, with
+higher scores indicating better perceptual quality. The metric
+is computed as:
+SSIM(v′, v) = (2µv · µv′ + c1)(2σv,v ′ + c2)
+(µ2v + µ2
+v′ + c1)(σ2v + σ2
+v′ + c2) , (16)
+where µv and µv′ denote the mean intensities, σ2
+v and σ2
+v′
+represent the variances, and σv,v ′ is the covariance between
+v and v′. c1 and c2 are stability constants.
+Learned Perceptual Image Patch Similarity
+(LPIPS) (Zhang et al. 2018a) measures perceptual simi-
+larity by comparing deep feature representations of image
+patches. It is sensitive to semantic differences and has been
+shown to correlate well with human perception. LPIPS is
+computed as:
+LPIPS(v′, v) =
+IX
+i=1
+X
+hi,wi
+ωi · [fi(v′)hi,wi − fi(v)hi,wi]2
+Hi · Wi
+,
+(17)
+where fi(·) denotes the features extracted from thei-th layer
+of a pre-trained AlexNet (Krizhevsky, Sutskever, and Hinton
+2012), and ωi is the learned weight for the i-th layer. Hi and
+Wi denote the spatial dimensions of the i-th layer’s feature
+map.
+Peak Signal-to-Noise Ratio (PSNR) evaluates image fi-
+delity at the pixel level by measuring the logarithmic ratio
+between the maximum possible pixel value and the mean
+squared error (MSE) between the real and translated images.
+It is defined as:
+PSNR(v′, v) = 10 · log10
+ 
+M · N · INTENSITY2
+maxPM
+i=1
+PN
+j=1[vij − v′
+ij]2
+!
+,
+(18)
+where M and N are the image height and width, respec-
+tively, and INTENSITY max is the maximum pixel value,
+which is 255 for 8-bit images.
+Datasets
+The VEDAI dataset (Razakarivony and Jurie 2016) is de-
+signed for dual-modality small vehicle detection in aerial
+imagery. It contains a total of 1,209 paired infrared-visible
+--- Page 16 ---
+Visible domainInfrared domain
+Translated data space 
+with constraint
+(b) Ours
+Translated data 
+space
+Visible domain
+Translated 
+infrared data point
+(a) Other modality translation methods
+Translated 
+data space
+Visible data 
+point
+Infrared data 
+point
+Infrared 
+data point
+Image pairImage pair
+Translated 
+visible data point
+Visible domain 
+Network
+Infrared domain 
+Network
+Infrared domain
+Single Network
+Figure 13: Comparison of bidirectional cross-modality translation frameworks.(a) Other modality translation methods: Inde-
+pendent networks for unidirectional translation (red / yellow arrows) operate in decoupled domains, relying on paired-image
+constraints but lacking joint optimization. (b) CM-Diff (Ours): A unified network performs simultaneous bidirectional mapping
+via direction-guided Bidirectional Diffusion Training (BDT) , with Statistical Constraint Inference (SCI) enforcing distribu-
+tional consistency across modalities (”translated data space with constraint”).
+image samples with resolutions of 1024 × 1024 and 512 ×
+512, captured under varied scene conditions. The infrared
+modality is based on near-infrared (NIR) imaging, making
+the dataset particularly suitable for cross-modality image
+translation and detection tasks involving small objects with
+complex backgrounds. The dataset also provides compre-
+hensive pixel-level annotations, which facilitate both super-
+vised training and objective performance benchmarking. In
+our experiments, we allocate 1,089 image pairs for training
+and the remaining 120 for testing to ensure a fair and bal-
+anced evaluation.
+The A VIID dataset (Han et al. 2023) consists of paired
+visible-infrared images captured by a dual-spectrum camera
+mounted on an unmanned aerial vehicle (UA V), across vary-
+ing illumination and environmental conditions. It is subdi-
+vided into three subsets: A VIID-1 includes 993 image pairs
+of resolution 434 × 434 featuring road scenes and common
+vehicles; A VIID-2 contains 1,090 low-light image pairs with
+visible noise and motion blur; and A VIID-3 offers 1,280 im-
+age pairs at 512 × 512 resolution, covering diverse scenar-
+ios such as roads, bridges, and residential streets. While the
+dataset was originally constructed for the visible-to-infrared
+image translation task, our framework supports bidirectional
+translation. Therefore, we adopt the full dataset for both
+IR→VIS and VIS →IR tasks. We divide the dataset into
+2,674 training pairs and 669 testing pairs.
+The M 3FD dataset (Liu et al. 2022) provides 4,500 spa-
+tially registered visible and infrared image pairs with a
+resolution of 1024 × 768. Although initially designed for
+multi-sensor fusion and object detection tasks, the high-
+resolution and scene diversity of the dataset make it well-
+suited for image-to-image translation applications. The data
+is collected from multiple urban and suburban locations
+in Dalian, China, including the Dalian University of Tech-
+nology, Golden Stone Beach, and Jinzhou District. Despite
+slight misalignments between the modalities, the dataset re-
+mains valuable for training robust translation models. For
+our experiments, we utilize 3,780 image pairs for training
+and reserve 210 pairs for testing.
+Table 12: Code and Dataset Sources for Evaluated Methods
+Method Code address
+T2V-DDPM https://github.com/Nithin-GK/T2V-DDPM
+CycleGANhttps://github.com/junyanz/pytorch-CycleGAN-and-pix2pix
+UNIT https://github.com/mingyuliutw/UNIT
+MUNIT https://github.com/NVlabs/MUNIT
+DCLGAN https://github.com/JunlinHan/DCLGAN
+I2V-GAN https://github.com/BIT-DA/I2V-GAN
+ROMA https://github.com/BIT-DA/ROMA
+CUT https://github.com/taesungp/contrastive-unpaired-translation
+Dataset Data address
+A VIID Averial-visible-to-infrared-image-translation
+VEDAI https://downloads.greyc.fr/vedai/
+M3FD https://github.com/dlut-dimt/TarDAL
+References
+Boroujeni, S. P. H.; and Razi, A. 2024. Ic-gan: An improved
+conditional generative adversarial network for rgb-to-ir im-
+age translation with applications to forest fire monitoring.
+Expert Systems with Applications , 238: 121962.
+Chung, H.; Kim, J.; Mccann, M. T.; Klasky, M. L.; and Ye,
+J. C. 2022. Diffusion posterior sampling for general noisy
+inverse problems. arXiv preprint arXiv:2209.14687.
+Deng, F.; Feng, H.; Liang, M.; Wang, H.; Yang, Y .; Gao, Y .;
+Chen, J.; Hu, J.; Guo, X.; and Lam, T. L. 2021. FEANet:
+--- Page 17 ---
+Feature-enhanced attention network for RGB-thermal real-
+time semantic segmentation. In 2021 IEEE/RSJ interna-
+tional conference on intelligent robots and systems (IROS) ,
+4467–4473. IEEE.
+Dhariwal, P.; and Nichol, A. 2021. Diffusion models beat
+gans on image synthesis. Advances in neural information
+processing systems, 34: 8780–8794.
+Di, X.; Riggan, B. S.; Hu, S.; Short, N. J.; and Patel, V . M.
+2019. Polarimetric thermal to visible face verification via
+self-attention guided synthesis. In 2019 International Con-
+ference on Biometrics (ICB), 1–8. IEEE.
+Ding, J.; Du, Y .; Li, W.; Pei, L.; and Cui, N. 2025. LG-
+Diff: Learning to follow local class-regional guidance for
+nearshore image cross-modality high-quality translation. In-
+formation Fusion, 117: 102870.
+Fu, H.; Wang, S.; Duan, P.; Xiao, C.; Dian, R.; Li, S.; and
+Li, Z. 2023. Lraf-net: Long-range attention fusion network
+for visible–infrared object detection. IEEE Transactions on
+Neural Networks and Learning Systems .
+Guo, J.; Gao, C.; Liu, F.; Meng, D.; and Gao, X. 2024.
+DAMSDet: Dynamic Adaptive Multispectral Detection
+Transformer with Competitive Query Selection and Adap-
+tive Feature Fusion. ECCV.
+Han, J.; Shoeiby, M.; Petersson, L.; and Armin, M. A. 2021.
+Dual contrastive learning for unsupervised image-to-image
+translation. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition , 746–755.
+Han, Z.; Zhang, S.; Su, Y .; Chen, X.; and Mei, S. 2024a. Dr-
+avit: Towards diverse and realistic aerial visible-to-infrared
+image translation. IEEE Transactions on Geoscience and
+Remote Sensing.
+Han, Z.; Zhang, S.; Su, Y .; Chen, X.; and Mei, S. 2024b.
+DR-A VIT: Towards Diverse and Realistic Aerial Visible-to-
+Infrared Image Translation. IEEE Transactions on Geo-
+science and Remote Sensing .
+Han, Z.; Zhang, Z.; Zhang, S.; Zhang, G.; and Mei, S. 2023.
+Aerial visible-to-infrared image translation: dataset, evalua-
+tion, and baseline. Journal of Remote Sensing, 3: 0096.
+He, G.; Zheng, K.; Chen, J.; Bao, F.; and Zhu, J. 2024. Con-
+sistency diffusion bridge models. Advances in Neural Infor-
+mation Processing Systems, 37: 23516–23548.
+Heusel, M.; Ramsauer, H.; Unterthiner, T.; Nessler, B.; and
+Hochreiter, S. 2017. Gans trained by a two time-scale up-
+date rule converge to a local nash equilibrium. Advances in
+neural information processing systems, 30.
+Ho, J.; Jain, A.; and Abbeel, P. 2020. Denoising diffusion
+probabilistic models. Advances in neural information pro-
+cessing systems, 33: 6840–6851.
+Huang, X.; Liu, M.-Y .; Belongie, S.; and Kautz, J. 2018.
+Multimodal unsupervised image-to-image translation. In
+Proceedings of the European conference on computer vision
+(ECCV), 172–189.
+Isola, P.; Zhu, J.-Y .; Zhou, T.; and Efros, A. A. 2017. Image-
+to-image translation with conditional adversarial networks.
+In Proceedings of the IEEE conference on computer vision
+and pattern recognition, 1125–1134.
+Ji, W.; Li, J.; Bian, C.; Zhou, Z.; Zhao, J.; Yuille, A. L.; and
+Cheng, L. 2023. Multispectral video semantic segmenta-
+tion: A benchmark dataset and baseline. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 1094–1104.
+Kim, B.; Kwon, G.; Kim, K.; and Ye, J. C. 2023. Unpaired
+image-to-image translation via neural schr\” odinger bridge.
+arXiv preprint arXiv:2305.15086.
+Kim, J.; Kim, M.; Kang, H.; and Lee, K. 2019. U-gat-it:
+Unsupervised generative attentional networks with adaptive
+layer-instance normalization for image-to-image translation.
+arXiv preprint arXiv:1907.10830.
+Koller, D.; and Friedman, N. 2009. Probabilistic graphical
+models: principles and techniques . MIT press.
+Krizhevsky, A.; Sutskever, I.; and Hinton, G. E. 2012. Im-
+agenet classification with deep convolutional neural net-
+works. Advances in neural information processing systems ,
+25.
+Kwon, T.; and Ye, J. C. 2021. Cycle-free cyclegan using in-
+vertible generator for unsupervised low-dose ct denoising.
+IEEE Transactions on Computational Imaging , 7: 1354–
+1368.
+Li, L.; and He, J. 2024. Bidirectional consistency models.
+arXiv preprint arXiv:2403.18035.
+Li, Q.; Zhang, C.; Hu, Q.; Zhu, P.; Fu, H.; and Chen, L.
+2023. Stabilizing multispectral pedestrian detection with ev-
+idential hybrid fusion. IEEE Transactions on Circuits and
+Systems for Video Technology.
+Li, S.; Han, B.; Yu, Z.; Liu, C. H.; Chen, K.; and Wang, S.
+2021. I2v-gan: Unpaired infrared-to-visible video transla-
+tion. In Proceedings of the 29th ACM international confer-
+ence on multimedia, 3061–3069.
+Lin, J.; Zhao, G.; Xu, J.; Wang, G.; Wang, Z.; Dantcheva,
+A.; Du, L.; and Chen, C. 2024. DiffTV: Identity-preserved
+thermal-to-visible face translation via feature alignment and
+dual-stage conditions. In Proceedings of the 32nd ACM In-
+ternational Conference on Multimedia, 10930–10938.
+Liu, F.; Gao, C.; Zhang, Y .; Guo, J.; Wang, J.; and Meng,
+D. 2024. Infmae: A foundation model in infrared modality.
+ECCV.
+Liu, G.-H.; Vahdat, A.; Huang, D.-A.; Theodorou, E. A.;
+Nie, W.; and Anandkumar, A. 2023a. I2SB: Image-to-Image
+Schr¨odinger Bridge. arXiv preprint arXiv:2302.05872.
+Liu, J.; Fan, X.; Huang, Z.; Wu, G.; Liu, R.; Zhong, W.;
+and Luo, Z. 2022. Target-aware Dual Adversarial Learning
+and a Multi-scenario Multi-Modality Benchmark to Fuse In-
+frared and Visible for Object Detection. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, 5802–5811.
+Liu, J.; Liu, Z.; Wu, G.; Ma, L.; Liu, R.; Zhong, W.; Luo,
+Z.; and Fan, X. 2023b. Multi-interactive feature learning
+and a full-time multi-modality benchmark for image fusion
+and segmentation. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision , 8115–8124.
+Liu, M.-Y .; Breuel, T.; and Kautz, J. 2017. Unsupervised
+image-to-image translation networks. Advances in neural
+information processing systems, 30.
+--- Page 18 ---
+Liu, S.; John, V .; Blasch, E.; Liu, Z.; and Huang, Y . 2018.
+Ir2vi: Enhanced night environmental perception by unsu-
+pervised thermal image translation. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recogni-
+tion Workshops, 1153–1160.
+Luo, F.; Li, Y .; Zeng, G.; Peng, P.; Wang, G.; and Li, Y . 2022.
+Thermal infrared image colorization for nighttime driving
+scenes with top-down guided attention. IEEE Transactions
+on Intelligent Transportation Systems, 23(9): 15808–15823.
+Luo, Z.; Gustafsson, F. K.; Zhao, Z.; Sj¨olund, J.; and Sch¨on,
+T. B. 2023. Controlling vision-language models for uni-
+versal image restoration. arXiv preprint arXiv:2310.01018,
+3(8).
+Ma, D.; Li, S.; Su, J.; Xian, Y .; and Zhang, T. 2024. Visible-
+to-Infrared Image Translation for Matching Tasks. IEEE
+Journal of Selected Topics in Applied Earth Observations
+and Remote Sensing.
+Maqsood, R.; Abid, F.; et al. ???? Cycle Consistency and
+Fine-Grained Image to Image Translation in Augmentation:
+An Overview.
+Meng, C.; Song, Y .; Song, J.; Wu, J.; Zhu, J.-Y .; and Ermon,
+S. 2021. Sdedit: Image synthesis and editing with stochastic
+differential equations. arXiv preprint arXiv:2108.01073.
+Nair, N. G.; and Patel, V . M. 2023. T2v-ddpm: Thermal to
+visible face translation using denoising diffusion probabilis-
+tic models. In 2023 IEEE 17th International Conference on
+Automatic Face and Gesture Recognition (FG), 1–7. IEEE.
+Oliveira, G. C.; Ngo, Q. C.; Papa, J. P.; and Kumar, D. 2024.
+A Stable Diffusion Approach for RGB to Thermal Image
+Conversion for Leg Ulcer Assessment. In 2024 IEEE 37th
+International Symposium on Computer-Based Medical Sys-
+tems (CBMS), 158–163. IEEE.
+Ordun, C.; Raff, E.; and Purushotham, S. 2023. When
+visible-to-thermal facial GAN beats conditional diffusion.
+In 2023 IEEE International Conference on Image Process-
+ing (ICIP), 181–185. IEEE.
+Park, T.; Efros, A. A.; Zhang, R.; and Zhu, J.-Y . 2020. Con-
+trastive learning for unpaired image-to-image translation. In
+Computer Vision–ECCV 2020: 16th European Conference,
+Glasgow, UK, August 23–28, 2020, Proceedings, Part IX 16,
+319–345. Springer.
+Razakarivony, S.; and Jurie, F. 2016. Vehicle detection in
+aerial imagery: A small target detection benchmark. Jour-
+nal of Visual Communication and Image Representation, 34:
+187–203.
+Ren, K.; Zhao, W.; Gu, G.; and Chen, Q. 2023. EADS:
+Edge-assisted and dual similarity loss for unpaired infrared-
+to-visible video translation. Infrared Physics & Technology,
+134: 104936.
+Sasaki, H.; Willcocks, C. G.; and Breckon, T. P. 2021. Unit-
+ddpm: Unpaired image translation with denoising diffusion
+probabilistic models. arXiv preprint arXiv:2104.05358.
+Soria, X.; Sappa, A.; Humanante, P.; and Akbarinia, A.
+2023. Dense extreme inception network for edge detection.
+Pattern Recognition, 139: 109461.
+Wang, H.; Li, N.; Zhao, H.; Wen, Y .; Su, Y .; and Fang, Y .
+2024. MappingFormer: Learning cross-modal feature map-
+ping for visible-to-infrared image translation. In Proceed-
+ings of the 32nd ACM International Conference on Multi-
+media, 10745–10754.
+Wang, Z.; Bovik, A. C.; Sheikh, H. R.; and Simoncelli, E. P.
+2004. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image process-
+ing, 13(4): 600–612.
+Wei, W.; Meng, D.; Zhao, Q.; Xu, Z.; and Wu, Y . 2019.
+Semi-Supervised Transfer Learning for Image Rain Re-
+moval. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR).
+Yadav, N. K.; Singh, S. K.; and Dubey, S. R. 2023. TV A-
+GAN: attention guided generative adversarial network for
+thermal to visible image transformations.Neural Computing
+and Applications, 35(27): 19729–19749.
+Yang, L.; Zhang, Z.; Song, Y .; Hong, S.; Xu, R.; Zhao, Y .;
+Zhang, W.; Cui, B.; and Yang, M.-H. 2023. Diffusion mod-
+els: A comprehensive survey of methods and applications.
+ACM Computing Surveys, 56(4): 1–39.
+Yang, W.; Tan, R. T.; Feng, J.; Liu, J.; Guo, Z.; and Yan, S.
+2017. Deep joint rain detection and removal from a single
+image. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, 1357–1366.
+Yu, Z.; Chen, K.; Li, S.; Han, B.; Liu, C. H.; and Wang, S.
+2022. ROMA: cross-domain region similarity matching for
+unpaired nighttime infrared to daytime visible video transla-
+tion. In Proceedings of the 30th ACM International Confer-
+ence on Multimedia, 5294–5302.
+Yuan, X.; Cheng, G.; Yan, K.; Zeng, Q.; and Han, J. 2023.
+Small object detection via coarse-to-fine proposal genera-
+tion and imitation learning. InProceedings of the IEEE/CVF
+international conference on computer vision , 6317–6327.
+Zhang, R.; Isola, P.; Efros, A. A.; Shechtman, E.; and Wang,
+O. 2018a. The unreasonable effectiveness of deep features as
+a perceptual metric. In Proceedings of the IEEE conference
+on computer vision and pattern recognition , 586–595.
+Zhang, T.; Wiliem, A.; Yang, S.; and Lovell, B. 2018b. Tv-
+gan: Generative adversarial network based thermal to visible
+face recognition. In 2018 international conference on bio-
+metrics (ICB), 174–181. IEEE.
+Zhao, M.; Bao, F.; Li, C.; and Zhu, J. 2022. Egsde: Unpaired
+image-to-image translation via energy-guided stochastic dif-
+ferential equations. Advances in Neural Information Pro-
+cessing Systems, 35: 3609–3623.
+Zhou, L.; Lou, A.; Khanna, S.; and Ermon, S. 2023.
+Denoising diffusion bridge models. arXiv preprint
+arXiv:2309.16948.
+Zhu, J.-Y .; Park, T.; Isola, P.; and Efros, A. A. 2017. Un-
+paired image-to-image translation using cycle-consistent ad-
+versarial networks. In Proceedings of the IEEE international
+conference on computer vision, 2223–2232.
