@@ -3,7 +3,7 @@ IR->RED single-direction DDPM U-Net.
 
 Design goal
 -----------
-Provide the simplest *unidirectional* counterpart to `cm_diff_unet.UNet`:
+Provide the simplest *unidirectional* counterpart to `cm_diff_unet.BidirectionalDDPMUNet`:
     - keep timestep conditioning (diffusion time embedding)
     - remove translation-direction embedding entirely
     - keep source-conditioned CFC cross-attention (single source encoder)
@@ -38,7 +38,7 @@ from .cm_diff_unet import (
 )
 
 
-class UNet(nn.Module):
+class IR2REDDDPMUNet(nn.Module):
     """
     Unidirectional conditional DDPM U-Net (IR->RED).
 

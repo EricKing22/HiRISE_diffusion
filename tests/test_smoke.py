@@ -9,9 +9,9 @@ a full training run.
 import pytest
 import torch
 
-from config import ModelConfig, TrainConfig, InferenceConfig
-from models.cm_diff_unet import (
-    UNet,
+from config import DDPMModelConfig, DDPMTrainConfig, DDPMInferenceConfig
+from models import (
+    BidirectionalDDPMUNet,
     SinusoidalTimeEmbedding,
     DirectionEmbedding,
     ResBlock,
@@ -29,25 +29,25 @@ C = 64      # smallest base_channels where C//2=32 is divisible by GroupNorm gro
 
 def test_config_defaults() -> None:
     """ModelConfig carries the paper hyperparameters as defaults."""
-    cfg = ModelConfig()
+    cfg = DDPMModelConfig()
     assert cfg.timesteps   == 1000
     assert cfg.beta_start  == 1e-4
-    assert cfg.beta_end    == 1e-2
+    assert cfg.beta_end    == 2e-2
     assert cfg.base_channels == 128
 
 
 def test_train_config_defaults() -> None:
-    cfg = TrainConfig()
+    cfg = DDPMTrainConfig()
     assert cfg.image_size  == 256
-    assert cfg.batch_size  == 6
+    assert cfg.batch_size  == 8
     assert cfg.lambda_ir_to_red == 1.0
     assert cfg.lambda_red_to_ir == 1.0
 
 
 def test_inference_config_defaults() -> None:
-    cfg = InferenceConfig()
-    assert cfg.lambda_scl == 20.0
-    assert cfg.lambda_ccl == 20.0
+    cfg = DDPMInferenceConfig()
+    assert cfg.lambda_scl == 0.0
+    assert cfg.lambda_ccl == 0.0
 
 
 # =============================================================================
@@ -150,12 +150,12 @@ def test_modality_encoder_output_scales() -> None:
 
 
 # =============================================================================
-# Full UNet
+# Full DDPM U-Net
 # =============================================================================
 
 @pytest.fixture
 def unet_inputs():
-    """Shared 3-channel input tensors for UNet tests (1ch each: target, source, edge)."""
+    """Shared 3-channel input tensors for DDPM U-Net tests (1ch each: target, source, edge)."""
     x_t       = torch.randn(B, 1, 256, 256)
     x_src     = torch.randn(B, 1, 256, 256)
     edge_map  = torch.randn(B, 1, 256, 256)
@@ -165,22 +165,22 @@ def unet_inputs():
 
 
 def test_unet_output_shape(unet_inputs) -> None:
-    """UNet output must be [B, 1, H, W] — same spatial size as input, single channel."""
-    model = UNet(base_channels=C)
+    """BidirectionalDDPMUNet output must be [B, 1, H, W] with the same spatial size as input."""
+    model = BidirectionalDDPMUNet(base_channels=C)
     out   = model(*unet_inputs)
     assert out.shape == (B, 1, 256, 256), f"expected ({B},1,256,256), got {out.shape}"
 
 
 def test_unet_output_is_finite(unet_inputs) -> None:
-    """UNet output must contain no NaN or Inf values."""
-    model = UNet(base_channels=C)
+    """BidirectionalDDPMUNet output must contain no NaN or Inf values."""
+    model = BidirectionalDDPMUNet(base_channels=C)
     out   = model(*unet_inputs)
-    assert torch.isfinite(out).all(), "UNet output contains NaN or Inf"
+    assert torch.isfinite(out).all(), "BidirectionalDDPMUNet output contains NaN or Inf"
 
 
 def test_unet_both_directions(unet_inputs) -> None:
-    """UNet must produce different outputs for direction=0 vs direction=1."""
-    model     = UNet(base_channels=C)
+    """BidirectionalDDPMUNet must produce different outputs for direction=0 vs direction=1."""
+    model     = BidirectionalDDPMUNet(base_channels=C)
     x_t, x_src, edge_map, _, t = unet_inputs
 
     out0 = model(x_t, x_src, edge_map, torch.zeros(B, dtype=torch.long), t)
@@ -190,7 +190,7 @@ def test_unet_both_directions(unet_inputs) -> None:
 
 def test_unet_gradients_flow(unet_inputs) -> None:
     """Loss.backward() must produce non-zero gradients for all model parameters."""
-    model = UNet(base_channels=C)
+    model = BidirectionalDDPMUNet(base_channels=C)
     out   = model(*unet_inputs)
     loss  = out.mean()
     loss.backward()

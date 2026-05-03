@@ -87,7 +87,7 @@ def bias_batch(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 
 # =============================================================================
-# Structural metrics (already in eval.py; mirrored here for standalone use)
+# Structural metrics (already in eval_ddpm.py; mirrored here for standalone use)
 # =============================================================================
 
 def ssim_safe(y_true: np.ndarray, y_pred: np.ndarray) -> float:

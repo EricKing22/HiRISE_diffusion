@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=evalFM_HiRISE_ed425
+#SBATCH --job-name=eval_fm_HiRISE_ed425
 #SBATCH --output=/scratch_root/ed425/HiRISE_diffusion/scripts/logs/eval_fm_%j.log
 
 #SBATCH --partition=root
@@ -33,15 +33,15 @@ echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 
 # Evaluation mode: ir2red | red2ir
-# Usage: sbatch eval_FM.sh [ir2red|red2ir] [num_steps]
+# Usage: sbatch eval_fm.sh [ir2red|red2ir] [num_steps]
 TRAIN_MODE=${1:-ir2red}
 NUM_STEPS=${2:-50}
 
 case "$TRAIN_MODE" in
-    ir2red|red2ir|bidirectional) ;;
+    ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch eval_FM.sh [ir2red|red2ir|bidirectional] [num_steps]"
+        echo "Usage: sbatch eval_fm.sh [ir2red|red2ir] [num_steps]"
         exit 1
         ;;
 esac

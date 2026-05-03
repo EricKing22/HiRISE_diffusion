@@ -2,13 +2,13 @@
 Evaluate a CM-Diff checkpoint on the validation set.
 
 Two evaluation modes:
-  - Noise-prediction MSE: fast, used by train.py during training (evaluate())
+  - Noise-prediction MSE: fast, used by train_ddpm.py during training (evaluate())
   - Image-level full metrics: runs full 1000-step sampling, computes
     MSE / MAE / PSNR / SSIM / Pearson-r and FID (evaluate_images())
 
 Usage (standalone — image-level):
     cd <project_root>
-    python src/eval.py \
+    python src/eval_ddpm.py \
         --checkpoint src/output/latest.pt \
         --data_root  /path/to/data \
         --csv_path   /path/to/data_record_bin12.csv
@@ -28,20 +28,18 @@ from scipy import linalg as sp_linalg
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from config import ModelConfig, DataConfig, InferenceConfig
-from models.cm_diff_unet import UNet
-from models.ir2red_ddpm import UNet as IR2REDUNet
-from models.red2ir_ddpm import UNet as RED2IRUNet
+from config import DDPMModelConfig, DataConfig, DDPMInferenceConfig
+from models import BidirectionalDDPMUNet, IR2REDDDPMUNet, RED2IRDDPMUNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.process import q_sample
 from diffusion.edge import compute_edge, load_dexined
 from compute_prior import load_prior_stats
-from inference import sample
+from inference_ddpm import sample
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
 from skimage.metrics import structural_similarity as sk_ssim
 
 # =============================================================================
-# Noise-prediction evaluation (used by train.py)
+# Noise-prediction evaluation (used by train_ddpm.py)
 # =============================================================================
 
 def eval_batch(
@@ -97,7 +95,7 @@ def evaluate(
 ) -> dict:
     """
     Noise-prediction evaluation over the full validation loader.
-    Fast — used by train.py during training.
+    Fast — used by train_ddpm.py during training.
 
     Returns dict with keys: loss, loss_ir2red, loss_red2ir.
     """
@@ -365,7 +363,7 @@ def evaluate_images(
     val_dataset:    DiffusionDataset,
     prior_red:      dict,
     prior_ir:       dict,
-    cfg_inf:        InferenceConfig,
+    cfg_inf:        DDPMInferenceConfig,
     device:         torch.device,
     max_samples:    int = 0,
     batch_size:     int = 4,
@@ -498,7 +496,7 @@ def evaluate_images(
 
 
 # =============================================================================
-# Dataset split (same logic as train.py to guarantee identical val set)
+# Dataset split (same logic as train_ddpm.py to guarantee identical val set)
 # =============================================================================
 
 def get_val_split(dr: pd.DataFrame):
@@ -552,9 +550,9 @@ def main() -> None:
                         help="Disable Method B dc subtraction (must match training setting)")
     args = parser.parse_args()
 
-    cfg_model = ModelConfig()
+    cfg_model = DDPMModelConfig()
     cfg_data  = DataConfig()
-    cfg_inf   = InferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
+    cfg_inf   = DDPMInferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -570,7 +568,7 @@ def main() -> None:
     print()
 
     if args.train_mode == "bidirectional":
-        model = UNet(
+        model = BidirectionalDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -578,7 +576,7 @@ def main() -> None:
             dropout=cfg_model.dropout,
         ).to(device)
     elif args.train_mode == "ir2red":
-        model = IR2REDUNet(
+        model = IR2REDDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -586,7 +584,7 @@ def main() -> None:
             dropout=cfg_model.dropout,
         ).to(device)
     else:
-        model = RED2IRUNet(
+        model = RED2IRDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -616,7 +614,7 @@ def main() -> None:
 
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
-    val_sets = [19645, 7292, 7293, 14774]
+
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
         allowed_sets=val_sets, dc=not args.no_dc,

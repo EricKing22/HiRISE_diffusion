@@ -574,7 +574,7 @@ return x̂_IR_0
 
 $\mathcal{L}_\text{cons}$ 的梯度针对 $\tilde{x}_0$ 计算，不针对 $x_t$。类似于 DPS（Chung et al. 2022），但用域统计量替代了学习的先验。
 
-### 5.5 实现说明（HiRISE 适配，`src/inference.py`）
+### 5.5 实现说明（HiRISE 适配，`src/inference_ddpm.py`）
 
 论文针对 RGB（3通道）图像设计，HiRISE 数据集为单通道（IR10 和 RED4 均为灰度图），实现上有以下差异：
 
@@ -603,7 +603,7 @@ $$h_i = \frac{\sum_j \exp\!\left(-\frac{(x_j - c_i)^2}{2\,\Delta^2}\right)}{\tex
 **先验统计的准备（`compute_prior_stats()`）：** 在推理前，需在训练集目标域上预先计算 $\mu_\text{prior}$、$\sigma_\text{prior}$、$h_\text{prior}$ 并保存为 `.pt` 文件：
 
 ```python
-from inference import compute_prior_stats, save_prior_stats
+from inference_ddpm import compute_prior_stats, save_prior_stats
 
 # 以 RED4（目标域）为例：
 tensors = [dataset[i]["red"] for i in range(len(dataset))]   # 所有 RED4 图像
@@ -615,7 +615,7 @@ save_prior_stats(stats, "checkpoints/prior_stats_red.pt")
 
 ```bash
 cd src
-python inference.py \
+python inference_ddpm.py \
     --source    ../data/example_ir.npy \
     --direction 0 \
     --checkpoint ../checkpoints/latest.pt \

@@ -6,7 +6,7 @@ Bias%) alongside the existing metrics (MSE, MAE, PSNR, SSIM, Pearson r, FID)
 so that diffusion-model results can be directly compared against the CNN
 benchmark.
 
-Key differences from eval.py (which is NOT modified):
+Key differences from eval_ddpm.py:
   • Three additional metrics: NMAE%, PWT@1%, Bias%  (both physical + normalized)
   • Per-image CSV export
   • Optional per-category evaluation (--category_eval)
@@ -36,16 +36,16 @@ import torch
 import torch.nn.functional as F
 from scipy import linalg as sp_linalg
 
-# ── Path setup (same pattern as eval.py) ─────────────────────────────────────
+# ── Path setup (same pattern as eval_ddpm.py) ─────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from config import ModelConfig, DataConfig, InferenceConfig
-from models.cm_diff_unet import UNet
+from config import DDPMModelConfig, DataConfig, DDPMInferenceConfig
+from models import BidirectionalDDPMUNet
 from diffusion.scheduler import DDPMScheduler
 from compute_prior import load_prior_stats
-from inference import sample
-from eval import get_val_split          # reuse identical train/val split
+from inference_ddpm import sample
+from eval_ddpm import get_val_split     # reuse identical train/val split
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
 from metrics_ardan import (
     nmae_batch, pwt_batch, bias_batch,
@@ -54,7 +54,7 @@ from metrics_ardan import (
 
 
 # =============================================================================
-# FID helpers (copied from eval.py — no changes)
+# FID helpers (copied from eval_ddpm.py)
 # =============================================================================
 
 def _build_inception(device):
@@ -95,7 +95,7 @@ def evaluate_loop(
     dataset:      DiffusionDataset,
     prior_red:    dict,
     prior_ir:     dict,
-    cfg_inf:      InferenceConfig,
+    cfg_inf:      DDPMInferenceConfig,
     device:       torch.device,
     max_samples:  int  = 0,
     batch_size:   int  = 4,
@@ -551,10 +551,10 @@ def main():
                         help="Path to evals_ardan.yaml")
     args = parser.parse_args()
 
-    cfg_model = ModelConfig()
+    cfg_model = DDPMModelConfig()
     cfg_data  = DataConfig()
-    cfg_inf   = InferenceConfig(lambda_scl=args.lambda_scl,
-                                lambda_ccl=args.lambda_ccl)
+    cfg_inf   = DDPMInferenceConfig(lambda_scl=args.lambda_scl,
+                                    lambda_ccl=args.lambda_ccl)
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -574,7 +574,7 @@ def main():
     print()
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = UNet(
+    model = BidirectionalDDPMUNet(
         in_channels=cfg_model.in_channels,
         out_channels=cfg_model.out_channels,
         base_channels=cfg_model.base_channels,
@@ -604,7 +604,7 @@ def main():
     # ── Dataset ───────────────────────────────────────────────────────────────
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
-    val_sets = [19645, 7292, 7293, 14774]   # local test sets (override for dev)
+
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
     )

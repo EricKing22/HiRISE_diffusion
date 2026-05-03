@@ -27,12 +27,11 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import FMModelConfig, FMInferenceConfig, DataConfig
-from models.ir2red_fm import FMUNet as IR2REDFMUNet
-from models.red2ir_fm import FMUNet as RED2IRFMUNet
+from models import IR2REDFMUNet, RED2IRFMUNet
 from diffusion.fm_utils import fm_interpolate, fm_velocity_target
 from inference_fm import sample_fm
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
-from eval import (
+from eval_ddpm import (
     _ssim_safe, _pearson_batch,
     _build_inception, _inception_features, _fid_from_features,
     get_val_split,
@@ -344,10 +343,10 @@ def evaluate_images_fm(
 
 
 # =============================================================================
-# Dataset split (identical to eval.py / train.py)
+# Dataset split (identical to eval_ddpm.py / train_ddpm.py)
 # =============================================================================
 
-# get_val_split is imported from eval.py
+# get_val_split is imported from eval_ddpm.py
 
 
 # =============================================================================
@@ -416,7 +415,7 @@ def main() -> None:
     # ── Dataset ───────────────────────────────────────────────────────────────
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
-    val_sets = [19645, 7292, 7293, 14774]
+
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
         allowed_sets=val_sets,
@@ -434,7 +433,7 @@ def main() -> None:
         train_mode=args.train_mode,
     )
 
-    # ── Print results table (same format as eval.py) ──────────────────────────
+    # ── Print results table (same format as eval_ddpm.py) ─────────────────────
     def _f4(v):      return f"{v:>10.4f}" if not math.isnan(v) else f"{'—':>10}"
     def _f2(v):      return f"{v:>10.2f}" if not math.isnan(v) else f"{'—':>10}"
     def _avg2(a, b):

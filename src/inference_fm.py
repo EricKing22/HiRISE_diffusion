@@ -2,7 +2,7 @@
 Flow Matching inference via Euler ODE integration.
 
 Generates a target-domain image from a source image using a trained
-FMUNet velocity network.  Starts from x_0 ~ N(0, I) and integrates
+IR2REDFMUNet velocity network.  Starts from x_0 ~ N(0, I) and integrates
 the learned velocity field to x_1 (clean image).
 
 Usage:
@@ -23,7 +23,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import FMModelConfig, FMInferenceConfig
-from models.ir2red_fm import FMUNet
+from models import IR2REDFMUNet
 from diffusion.fm_utils import fm_euler_step
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -99,7 +99,7 @@ def main() -> None:
         cfg_inf = FMInferenceConfig(num_steps=args.num_steps)
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model = FMUNet(
+    model = IR2REDFMUNet(
         in_channels    = cfg_model.in_channels,
         out_channels   = cfg_model.out_channels,
         base_channels  = cfg_model.base_channels,

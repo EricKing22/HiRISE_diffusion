@@ -21,6 +21,7 @@ checkpoints/
 wandb/
 
 .claude/
+AGENTS.md
 
 *.pt
 *.log

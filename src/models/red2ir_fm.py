@@ -3,7 +3,7 @@ RED->IR Flow Matching velocity network.
 
 Design goal
 -----------
-Provide a Flow Matching counterpart to `red2ir_ddpm.UNet`:
+Provide a Flow Matching counterpart to `red2ir_ddpm.RED2IRDDPMUNet`:
     - same U-Net backbone (channels, ResBlocks, CFC cross-attention)
     - simplified 1-channel input (just x_t; source via cross-attention only)
     - continuous time t ∈ [0, 1] scaled for the sinusoidal embedding
@@ -33,11 +33,11 @@ from .cm_diff_unet import (
 )
 
 
-class FMUNet(nn.Module):
+class RED2IRFMUNet(nn.Module):
     """
     Unidirectional conditional Flow Matching U-Net (RED->IR).
 
-    Architecture mirrors the DDPM backbone (red2ir_ddpm.UNet) so that
+    Architecture mirrors the DDPM backbone (red2ir_ddpm.RED2IRDDPMUNet) so that
     checkpoints and training behaviour stay comparable, with only the
     stem input width and time-embedding scaling changed.
     """

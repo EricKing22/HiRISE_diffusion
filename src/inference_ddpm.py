@@ -18,7 +18,7 @@ Direction labels:
 
 Usage:
     cd src
-    python inference.py \\
+    python inference_ddpm.py \\
         --source   path/to/source.npy   \\
         --direction 0                   \\
         --checkpoint ../checkpoints/latest.pt \\
@@ -34,8 +34,8 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import ModelConfig, InferenceConfig
-from models.cm_diff_unet import UNet
+from config import DDPMModelConfig, DDPMInferenceConfig
+from models import BidirectionalDDPMUNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.edge import compute_edge, load_dexined
 from compute_prior import (
@@ -60,7 +60,7 @@ def ddpm_step_sci(
     direction,                          # [B] long tensor, or None for unidirectional
     t_batch:        torch.Tensor,       # [B]  long  current timestep indices
     prior_stats:    dict,
-    cfg_inf:        InferenceConfig,
+    cfg_inf:        DDPMInferenceConfig,
 ) -> torch.Tensor:
     """
     One reverse diffusion step t → t-1 with SCI gradient correction.
@@ -140,7 +140,7 @@ def sample(
     x_source:       torch.Tensor,     # [B, 1, H, W]
     direction,                        # int (0 or 1) for bidirectional, None for unidirectional
     prior_stats:    dict,
-    cfg_inf:        InferenceConfig,
+    cfg_inf:        DDPMInferenceConfig,
     device:         torch.device,
     verbose:        bool = True,
     edge_mode:      str = "sobel",
@@ -228,11 +228,11 @@ def main() -> None:
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    cfg_model = ModelConfig()
-    cfg_inf   = InferenceConfig()
+    cfg_model = DDPMModelConfig()
+    cfg_inf   = DDPMInferenceConfig()
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    model = UNet(
+    model = BidirectionalDDPMUNet(
         in_channels   = cfg_model.in_channels,
         out_channels  = cfg_model.out_channels,
         base_channels = cfg_model.base_channels,
@@ -312,7 +312,7 @@ def main() -> None:
     scale  = (1.4826 * mad).clamp_min(0.05)
     x_source = ((x_source - center) / scale).clamp(-10, 10)
 
-    # Method B: subtract IR10 normalized mean so scene enters UNet with IR mean≈0
+    # Method B: subtract IR10 normalized mean so scene enters BidirectionalDDPMUNet with IR mean≈0
     # flat already holds the raw IR10 pixels (or source pixels as fallback)
     dc = ((flat - center) / scale).clamp(-10, 10).mean()
     x_source = x_source - dc

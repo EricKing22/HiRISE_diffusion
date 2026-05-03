@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --job-name=eval_HiRISE_ed425
-#SBATCH --output=/scratch_root/ed425/HiRISE_diffusion/scripts/logs/eval_%j.log
+#SBATCH --job-name=eval_ddpm_HiRISE_ed425
+#SBATCH --output=/scratch_root/ed425/HiRISE_diffusion/scripts/logs/eval_ddpm_%j.log
 
 #SBATCH --partition=root
 
@@ -31,7 +31,7 @@ case "$EVAL_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid EVAL_MODE: $EVAL_MODE"
-        echo "Usage: sbatch eval.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
+        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
         exit 1
         ;;
 esac
@@ -46,7 +46,7 @@ case "$DC_MODE" in
     dc|no_dc) ;;
     *)
         echo "Invalid DC_MODE: $DC_MODE"
-        echo "Usage: sbatch eval.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
         exit 1
         ;;
 esac
@@ -81,7 +81,7 @@ echo ""
 # Metrics: MSE / MAE / PSNR / SSIM / Pearson-r (FID disabled by default)
 for LAMBDA in 0.0 10.0 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0; do
     echo "Running eval: mode=$EVAL_MODE  edge=$EDGE_MODE  lambda=$LAMBDA"
-    python src/eval.py \
+    python src/eval_ddpm.py \
         --checkpoint   $CHECKPOINT   \
         --train_mode   $EVAL_MODE    \
         --prior_dir    $PRIOR_DIR    \

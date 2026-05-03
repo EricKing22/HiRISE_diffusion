@@ -368,7 +368,7 @@ class ModalityEncoder(nn.Module):
     Extracts multi-scale feature maps from a source-modality image to serve
     as K,V context in CFC cross-attention.  No decoder, no time conditioning.
 
-    Two instances exist inside UNet:
+    Two instances exist inside BidirectionalDDPMUNet:
         encoder_VIS — extracts VIS source features (IR→VIS direction, C=0)
         encoder_IR  — extracts IR  source features (VIS→IR direction, C=1)
 
@@ -440,7 +440,7 @@ class ModalityEncoder(nn.Module):
 # Main U-Net
 # =============================================================================
 
-class UNet(nn.Module):
+class BidirectionalDDPMUNet(nn.Module):
     """
     CM-Diff denoising U-Net.
 

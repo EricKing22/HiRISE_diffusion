@@ -17,7 +17,7 @@ pytest
 - `src/hirise_diffusion/data/`: dataset code and transforms
 - `src/hirise_diffusion/models/`: model architecture modules
 - `src/hirise_diffusion/diffusion/`: schedules and diffusion process logic
-- `src/hirise_diffusion/train.py`: training entrypoint
+- `src/train_ddpm.py`: DDPM training entry point
 - `src/hirise_diffusion/sample.py`: sampling/inference entrypoint
 
 ## Next steps

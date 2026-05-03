@@ -1,7 +1,7 @@
 #!/bin/bash
 
-#SBATCH --job-name=trainFM_HiRISE_ed425
-#SBATCH --output=/scratch_root/ed425/HiRISE_diffusion/scripts/logs/train_fm_%j.log
+#SBATCH --job-name=train_ddpm_HiRISE_ed425
+#SBATCH --output=/scratch_root/ed425/HiRISE_diffusion/scripts/logs/train_ddpm_%j.log
 
 #SBATCH --partition=root
 
@@ -53,35 +53,64 @@ case "$TRAIN_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch train_FM.sh [bidirectional|ir2red|red2ir]"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
         exit 1
         ;;
 esac
 
-LATEST_CKPT=${CKPT_DIR}/latest_fm_${TRAIN_MODE}.pt
-RUN_CKPT_PATTERN=${CKPT_DIR}/fm_${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt
+# Edge detection mode switch:
+#   sobel (default) | dexined
+EDGE_MODE=${2:-dexined}
+case "$EDGE_MODE" in
+    sobel|dexined) ;;
+    *)
+        echo "Invalid EDGE_MODE: $EDGE_MODE"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        exit 1
+        ;;
+esac
+
+# DC offset mode (Method B): dc (default) | no_dc
+DC_MODE=${3:-dc}
+case "$DC_MODE" in
+    dc|no_dc) ;;
+    *)
+        echo "Invalid DC_MODE: $DC_MODE"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        exit 1
+        ;;
+esac
+DC_FLAG=""
+[ "$DC_MODE" = "no_dc" ] && DC_FLAG="--no_dc"
+
+LATEST_CKPT=${CKPT_DIR}/latest_${TRAIN_MODE}.pt
+RUN_CKPT_PATTERN=${CKPT_DIR}/${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt
 
 echo "Checkpoint dir          : $CKPT_DIR"
 echo "Latest checkpoint file  : $LATEST_CKPT"
 echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
-echo "Train mode              : $TRAIN_MODE"
+echo "Train mode   : $TRAIN_MODE"
+echo "Edge mode    : $EDGE_MODE"
+echo "DC mode      : $DC_MODE"
 echo ""
 
 if [ "$TRAIN_MODE" = "bidirectional" ]; then
-    wandb_project=HiRISE_diffusion_fm
+    wandb_project=HiRISE_diffusion
 elif [ "$TRAIN_MODE" = "ir2red" ]; then
-    wandb_project=HiRISE_diffusion_fm_ir2red
+    wandb_project=HiRISE_diffusion_ir2red
 else
-    wandb_project=HiRISE_diffusion_fm_red2ir
+    wandb_project=HiRISE_diffusion_red2ir
 fi
 
-python -u src/train_fm.py \
+python src/train_ddpm.py \
     --data_root     $DATA_ROOT        \
     --csv_path      $CSV_PATH         \
     --ckpt_dir      $CKPT_DIR         \
-    --wandb_project $wandb_project    \
-    --run_name      "fm_${TRAIN_MODE}_slurm_${SLURM_JOB_ID}" \
-    --train_mode    $TRAIN_MODE
+    --wandb_project $wandb_project   \
+    --run_name      "${TRAIN_MODE}_${EDGE_MODE}_${DC_MODE}_slurm_${SLURM_JOB_ID}" \
+    --train_mode    $TRAIN_MODE       \
+    --edge_mode     $EDGE_MODE        \
+    $DC_FLAG
 
 end_time=$(date +%s)
 

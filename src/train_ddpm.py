@@ -5,11 +5,11 @@ Training loop (BDT — Bidirectional Diffusion Training):
   Each batch is split into two halves:
     Direction 0 (IR10 → RED4): source=ir,  target=red
     Direction 1 (RED4 → IR10): source=red, target=ir
-  Both directions share the same UNet; L_joint = L_A + L_B.
+  Both directions share the same BidirectionalDDPMUNet; L_joint = L_A + L_B.
 
 Usage:
     cd src
-    python train.py
+    python train_ddpm.py
 """
 
 import os
@@ -25,10 +25,8 @@ import wandb
 # Allow imports from src/
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import ModelConfig, TrainConfig, DataConfig
-from models.cm_diff_unet import UNet as BidirectionalUNet
-from models.ir2red_ddpm import UNet as IR2REDUNet
-from models.red2ir_ddpm import UNet as RED2IRUNet
+from config import DDPMModelConfig, DDPMTrainConfig, DataConfig
+from models import BidirectionalDDPMUNet, IR2REDDDPMUNet, RED2IRDDPMUNet
 from diffusion.scheduler import DDPMScheduler
 from diffusion.process import q_sample
 from diffusion.edge import compute_edge, load_dexined
@@ -36,7 +34,7 @@ from diffusion.edge import compute_edge, load_dexined
 # Add project root for data imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
-from eval import evaluate, evaluate_unidirectional, get_val_split
+from eval_ddpm import evaluate, evaluate_unidirectional, get_val_split
 
 
 # =============================================================================
@@ -85,7 +83,7 @@ def train_step(
     model:     torch.nn.Module,
     scheduler: DDPMScheduler,
     device:    torch.device,
-    cfg_train: TrainConfig,
+    cfg_train: DDPMTrainConfig,
     train_mode: str,
     edge_mode: str = "sobel",
     dexined_model: torch.nn.Module = None,
@@ -178,8 +176,8 @@ def main() -> None:
                         help="Disable Method B dc subtraction (IR mean kept non-zero)")
     args = parser.parse_args()
 
-    cfg_model = ModelConfig()
-    cfg_train = TrainConfig()
+    cfg_model = DDPMModelConfig()
+    cfg_train = DDPMTrainConfig()
     cfg_data  = DataConfig()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -194,7 +192,7 @@ def main() -> None:
 
     # ── Model ─────────────────────────────────────────────────────────────
     if args.train_mode == "bidirectional":
-        model = BidirectionalUNet(
+        model = BidirectionalDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -203,7 +201,7 @@ def main() -> None:
         ).to(device)
         model_tag = "cm_diff_unet"
     elif args.train_mode == "ir2red":
-        model = IR2REDUNet(
+        model = IR2REDDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -212,7 +210,7 @@ def main() -> None:
         ).to(device)
         model_tag = "ir2red_ddpm"
     else:
-        model = RED2IRUNet(
+        model = RED2IRDDPMUNet(
             in_channels=cfg_model.in_channels,
             out_channels=cfg_model.out_channels,
             base_channels=cfg_model.base_channels,
@@ -229,7 +227,7 @@ def main() -> None:
         dexined_model = load_dexined(args.dexined_weights, device)
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"UNet parameters: {n_params:,}")
+    print(f"{model.__class__.__name__} parameters: {n_params:,}")
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg_train.lr)

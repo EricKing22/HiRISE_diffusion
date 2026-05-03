@@ -2,7 +2,7 @@
 Compute SCI prior statistics (mu, sigma, histogram) from the training dataset
 and save prior_ir.pt / prior_red.pt to --prior_dir.
 
-Run once after training; the saved files are loaded by inference.py.
+Run once after training; the saved files are loaded by inference_ddpm.py.
 
 Usage:
     cd <project_root>

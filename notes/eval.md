@@ -277,7 +277,7 @@ These are mathematically identical. Physical and normalized PSNR are redundant f
 
 ## Implementation
 
-- `evaluate_images()` in `src/eval.py` computes all metrics batch-by-batch
+- `evaluate_images()` in `src/eval_ddpm.py` computes all metrics batch-by-batch
 - DDPM outputs clamped to `[-10, 10]` before any metric computation (suppresses outlier explosion from 1000-step numerical drift)
 - Denormalization: `x_phys = (clamp(x, -10, 10) + dc) × scale + center` using per-sample `norm_stats` (3,) = [center, scale, dc]
 - Physical PSNR: `10·log10(1.0² / mean(MSE_phys))` | Normalized PSNR: `10·log10(20² / mean(MSE_norm))`

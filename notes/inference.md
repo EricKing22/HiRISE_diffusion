@@ -1,6 +1,6 @@
 # HiRISE 推理原理笔记
 
-`src/inference.py` 实现了基于 CM-Diff 的 SCI（Statistical Constraint Inference）双向图像翻译：
+`src/inference_ddpm.py` 实现了基于 CM-Diff 的 SCI（Statistical Constraint Inference）双向图像翻译：
 
 - **Direction 0**：IR10 → RED4
 - **Direction 1**：RED4 → IR10
@@ -29,7 +29,7 @@ HiRISE 图像含有噪声列和仪器伪迹，MAD 对异常值鲁棒。系数 1.
 **为什么需要 `clamp_min(0.05)` 和 `clamp(-10, 10)`？**
 低对比度 patch（均匀沙丘/岩面）的 MAD 可能接近 0，不加限制时 scale = 1e-3 导致归一化值域 ±500，prior 统计（sigma、histogram range）完全失真。`clamp_min(0.05)` 将放大倍率上限设为 20×；`clamp(-10, 10)` 兜底截断残余离群值。**90% 的真实像素在 ±0.66 以内，clamp(-10,10) 从不截断实际地形细节。**
 
-**推理时的归一化（`inference.py main()`）：**
+**推理时的归一化（`inference_ddpm.py main()`）：**
 脚本自动定位 IR10 文件来获取统计量：
 
 ```python
@@ -77,7 +77,7 @@ center、scale、dc **三个参数全部由 IR10 的像素值计算**，与 RED4
 **RED→IR 部署时 dc = 0：** 当 IR10 配对文件不可用时，令 dc = 0，等效于跳过 dc 减除步骤。此时：
 - 模型输出已在归一化空间，直接报告归一化指标（MSE_norm、SSIM_norm、Pearson）是有效的
 - 物理 DN 空间的精确还原不可能——因为 center/scale 也缺失，无法恢复绝对亮度
-- 若要对 RED→IR 评估反归一化，只能在有 ground-truth IR10 的受控评估环境下进行（eval.py 的做法）
+- 若要对 RED→IR 评估反归一化，只能在有 ground-truth IR10 的受控评估环境下进行（eval_ddpm.py 的做法）
 
 ---
 
@@ -248,7 +248,7 @@ IR10_pred_norm  (归一化空间)
 
 ```bash
 # Direction 0: IR10 → RED4
-.venv/Scripts/python.exe src/inference.py \
+.venv/Scripts/python.exe src/inference_ddpm.py \
     --source    data/files/npy_files_b12/ESP_058229_1150/ESP_058229_1150_0_IR10.npy \
     --direction 0 \
     --checkpoint src/output/latest.pt \
@@ -256,7 +256,7 @@ IR10_pred_norm  (归一化空间)
     --output     outputs/pred_RED4.npy
 
 # Direction 1: RED4 → IR10
-.venv/Scripts/python.exe src/inference.py \
+.venv/Scripts/python.exe src/inference_ddpm.py \
     --source    data/files/npy_files_b12/ESP_058229_1150/ESP_058229_1150_0_RED4.npy \
     --direction 1 \
     --checkpoint src/output/latest.pt \
@@ -267,7 +267,7 @@ IR10_pred_norm  (归一化空间)
 ### Notebook 中调用
 
 ```python
-from inference import sample
+from inference_ddpm import sample
 from compute_prior import load_prior_stats
 from config import InferenceConfig
 

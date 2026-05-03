@@ -1,5 +1,5 @@
 from .cm_diff_unet import (
-    UNet,
+    BidirectionalDDPMUNet,
     SinusoidalTimeEmbedding,
     DirectionEmbedding,
     ResBlock,
@@ -7,23 +7,23 @@ from .cm_diff_unet import (
     CrossAttentionBlock,
     ModalityEncoder,
 )
-from .ir2red_ddpm import UNet as IR2REDUNet
-from .red2ir_ddpm import UNet as RED2IRUNet
-from .ir2red_fm import FMUNet as IR2REDFMUNet
-from .red2ir_fm import FMUNet as RED2IRFMUNet
+from .ir2red_ddpm import IR2REDDDPMUNet
+from .red2ir_ddpm import RED2IRDDPMUNet
+from .ir2red_fm import IR2REDFMUNet
+from .red2ir_fm import RED2IRFMUNet
 from .dexined import DexiNed
 
 __all__ = [
-    "UNet",
+    "BidirectionalDDPMUNet",
+    "IR2REDDDPMUNet",
+    "RED2IRDDPMUNet",
+    "IR2REDFMUNet",
+    "RED2IRFMUNet",
     "SinusoidalTimeEmbedding",
     "DirectionEmbedding",
     "ResBlock",
     "ConvResBlock",
     "CrossAttentionBlock",
     "ModalityEncoder",
-    "IR2REDUNet",
-    "RED2IRUNet",
-    "IR2REDFMUNet",
-    "RED2IRFMUNet",
     "DexiNed",
 ]

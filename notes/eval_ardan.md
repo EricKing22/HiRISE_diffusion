@@ -8,7 +8,7 @@ baseline and the diffusion approach.
 
 ## Why a Separate Evaluation Script?
 
-`eval.py` is not modified. All new code lives in `src/eval_ardan.py` and
+`eval_ddpm.py` is not modified. All new code lives in `src/eval_ardan.py` and
 `src/metrics_ardan.py`. This avoids disrupting the existing training/eval
 pipeline while adding the HiRISE benchmark metrics.
 
@@ -53,7 +53,7 @@ returning `[B]` per-image values. These are then averaged across the full eval s
 
 ## Existing Metrics (Unchanged)
 
-Carried over from `eval.py` with identical formulas:
+Carried over from `eval_ddpm.py` with identical formulas:
 
 | Metric | Space | Notes |
 |--------|-------|-------|

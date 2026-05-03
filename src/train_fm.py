@@ -1,7 +1,7 @@
 """
 Flow Matching training script for HiRISE IR10 → RED4 (and RED4 → IR10).
 
-Mirrors the structure of train.py but replaces the DDPM forward process
+Mirrors the structure of train_ddpm.py but replaces the DDPM forward process
 with rectified-flow linear interpolation and velocity-prediction loss.
 
 Usage:
@@ -23,18 +23,17 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config import FMModelConfig, FMTrainConfig, DataConfig
-from models.ir2red_fm import FMUNet as IR2REDFMUNet
-from models.red2ir_fm import FMUNet as RED2IRFMUNet
+from models import IR2REDFMUNet, RED2IRFMUNet
 from diffusion.fm_utils import fm_interpolate, fm_velocity_target
 from eval_fm import evaluate_fm_unidirectional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
-from eval import get_val_split
+from eval_ddpm import get_val_split
 
 
 # =============================================================================
-# Checkpoint helpers  (identical to train.py)
+# Checkpoint helpers  (identical to train_ddpm.py)
 # =============================================================================
 
 def save_checkpoint(step, model, optimizer, loss, path):
@@ -155,7 +154,7 @@ def main() -> None:
     print(f"Training mode: {args.train_mode}  model={model_tag}")
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"FMUNet parameters: {n_params:,}")
+    print(f"{model.__class__.__name__} parameters: {n_params:,}")
 
     # ── Optimiser ─────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg_train.lr)

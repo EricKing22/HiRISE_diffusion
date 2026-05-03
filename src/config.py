@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-class ModelConfig(BaseModel):
+class DDPMModelConfig(BaseModel):
     # ── U-Net architecture (CM-Diff paper §6 / Table 7) ──────────────────────
     in_channels:    int = 3      # noisy target (1) + source image (1) + edge map (1)
     out_channels:   int = 1      # predicted noise ε  (single-channel grayscale)
@@ -31,7 +31,7 @@ class DataConfig(BaseModel):
     csv_path:    str  = "/scratch_root/ed425/HiRISE/files/data_record_bin12.csv"           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
 
 
-class TrainConfig(BaseModel):
+class DDPMTrainConfig(BaseModel):
     # ── Data ──────────────────────────────────────────────────────────────────
     image_size:  int = 256
     batch_size:  int = 8       # paper Table 7
@@ -53,7 +53,7 @@ class TrainConfig(BaseModel):
     resume:      bool = False   # True = auto-resume from latest.pt if it exists
 
 
-class InferenceConfig(BaseModel):
+class DDPMInferenceConfig(BaseModel):
     # ── SCI constraint weights (paper Table 8, optimal λ = 20) ───────────────
     lambda_scl:  float = 0.0   # Statistical Constraint Loss weight (0 = disabled)
     lambda_ccl:  float = 0.0   # Channel Constraint Loss weight (0 = disabled)
@@ -104,3 +104,9 @@ class FMTrainConfig(BaseModel):
 class FMInferenceConfig(BaseModel):
     # ── ODE solver ────────────────────────────────────────────────────────
     num_steps:      int   = 50     # Euler ODE steps (vs DDPM's 1000)
+
+
+# Backward-compatible aliases. Prefer the explicit DDPM* names in new code.
+ModelConfig = DDPMModelConfig
+TrainConfig = DDPMTrainConfig
+InferenceConfig = DDPMInferenceConfig

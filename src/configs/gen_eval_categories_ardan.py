@@ -30,14 +30,14 @@ from datetime import date
 import pandas as pd
 import yaml
 
-# ── Add project root to path so we can import eval.get_val_split ─────────────
+# ── Add project root to path so we can import eval_ddpm.get_val_split ─────────
 _HERE = os.path.dirname(os.path.abspath(__file__))          # src/configs/
 _SRC  = os.path.dirname(_HERE)                              # src/
 _ROOT = os.path.dirname(_SRC)                               # project root
 sys.path.insert(0, _SRC)
 sys.path.insert(0, _ROOT)
 
-from eval import get_val_split   # reuse the same 80/20 split as training
+from eval_ddpm import get_val_split   # reuse the same 80/20 split as training
 
 
 N_PER_CAT = 20   # observations per category
