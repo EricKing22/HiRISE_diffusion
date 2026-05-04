@@ -27,9 +27,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config import FMModelConfig, FMInferenceConfig, DataConfig
-from models import IR2REDFMUNet, RED2IRFMUNet
+from models import IR2REDFMUNet, RED2IRFMUNet, BidirectionalFMUNet
 from diffusion.fm_utils import fm_interpolate, fm_velocity_target
 from inference_fm import sample_fm
+from compute_prior import load_prior_stats
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
 from eval_ddpm import (
     _ssim_safe, _pearson_batch,
@@ -56,10 +57,10 @@ def eval_fm_batch(
     red = batch["red"].to(device)
     B   = ir.shape[0]
 
-    half      = B // 2
+    n_ir2red  = (B + 1) // 2
     direction = torch.cat([
-        torch.zeros(half,       dtype=torch.long, device=device),
-        torch.ones(B - half,    dtype=torch.long, device=device),
+        torch.zeros(n_ir2red,       dtype=torch.long, device=device),
+        torch.ones(B - n_ir2red,    dtype=torch.long, device=device),
     ])
 
     mask     = (direction == 0)[:, None, None, None]
@@ -71,7 +72,7 @@ def eval_fm_batch(
     x_t      = fm_interpolate(x_target, noise, t)
     v_target = fm_velocity_target(x_target, noise)
 
-    v_pred = model(x_t, x_source, t)
+    v_pred = model(x_t, x_source, direction, t)
     loss_per_sample = F.mse_loss(v_pred, v_target, reduction="none").mean(dim=[1, 2, 3])
 
     mask_1d     = (direction == 0)
@@ -172,6 +173,8 @@ def _eval_one_direction_fm(
     device,
     compute_fid, inception,
     label,
+    direction=None,
+    prior_stats=None,
 ):
     """
     Full FM Euler ODE sampling for one (src→tgt) direction.
@@ -182,9 +185,15 @@ def _eval_one_direction_fm(
     B = src.shape[0]
 
     with torch.no_grad():
-        pred = sample_fm(model, src, cfg_inf, device, verbose=False)
+        pred = sample_fm(
+            model, src, cfg_inf, device,
+            direction=direction,
+            prior_stats=prior_stats,
+            verbose=False,
+        )
 
-    pred_norm = pred.clamp(-10.0, 10.0)
+    pred_raw  = pred
+    pred_norm = pred_raw.clamp(-10.0, 10.0)
     pred_phys = (pred_norm + dc) * scale + center
     tgt_phys  = (tgt       + dc) * scale + center
 
@@ -192,6 +201,13 @@ def _eval_one_direction_fm(
     mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1, 2, 3])
     mse_norm_b = F.mse_loss(pred_norm, tgt,       reduction="none").mean(dim=[1, 2, 3])
     mae_norm_b = F.l1_loss( pred_norm, tgt,        reduction="none").mean(dim=[1, 2, 3])
+    target_range_b = (tgt_phys.amax(dim=[1, 2, 3]) - tgt_phys.amin(dim=[1, 2, 3])).clamp_min(1e-6)
+    rel_mae_b = mae_phys_b / target_range_b
+    rel_rmse_b = torch.sqrt(mse_phys_b.clamp_min(0.0)) / target_range_b
+    scale_b = scale.flatten()
+    src_clip_b = (src.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    tgt_clip_b = (tgt.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    pred_clip_b = (pred_raw.abs() >= 9.999).float().mean(dim=[1, 2, 3])
 
     ssim_phy_vals, ssim_norm_vals = [], []
     for i in range(B):
@@ -212,6 +228,13 @@ def _eval_one_direction_fm(
         mae_phys  = mae_phys_b.cpu().tolist(),
         mse_norm  = mse_norm_b.cpu().tolist(),
         mae_norm  = mae_norm_b.cpu().tolist(),
+        target_range = target_range_b.cpu().tolist(),
+        rel_mae      = rel_mae_b.cpu().tolist(),
+        rel_rmse     = rel_rmse_b.cpu().tolist(),
+        scale        = scale_b.cpu().tolist(),
+        src_clip     = src_clip_b.cpu().tolist(),
+        tgt_clip     = tgt_clip_b.cpu().tolist(),
+        pred_clip    = pred_clip_b.cpu().tolist(),
         ssim_phys = ssim_phy_vals,
         ssim_norm = ssim_norm_vals,
         pearson   = pearson_b.cpu().tolist(),
@@ -232,11 +255,15 @@ def evaluate_images_fm(
     seed:           int  = 42,
     compute_fid:    bool = True,
     train_mode:     str  = "ir2red",
+    prior_red:      dict | None = None,
+    prior_ir:       dict | None = None,
+    show_progress:  bool = False,
 ) -> dict:
     """
     Image-level evaluation: full Euler ODE sampling in batches.
 
     train_mode controls which direction is evaluated:
+      "bidirectional" — both IR→RED and RED→IR
       "ir2red" — IR→RED  (source=IR, target=RED)
       "red2ir" — RED→IR  (source=RED, target=IR)
 
@@ -255,6 +282,8 @@ def evaluate_images_fm(
 
     # Per-direction accumulators — index 0 = IR→RED, index 1 = RED→IR
     accs = [{k: [] for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
+                              "target_range", "rel_mae", "rel_rmse", "scale",
+                              "src_clip", "tgt_clip", "pred_clip",
                               "ssim_norm", "ssim_phys", "pearson",
                               "fid_real",  "fid_fake")}
             for _ in range(2)]
@@ -280,22 +309,34 @@ def evaluate_images_fm(
         shared = dict(cfg_inf=cfg_inf, center=center, scale=scale, dc=dc,
                       device=device, compute_fid=compute_fid, inception=inception)
 
-        progress_parts = [f"  [{n_done + B}/{n}]"]
+        progress_parts = [f"  [{n_done + B}/{n}]"] if show_progress else None
 
-        dir_idx        = 0 if train_mode == "ir2red" else 1
-        src, tgt       = (ir, red) if train_mode == "ir2red" else (red, ir)
-        label          = "IR→RED" if train_mode == "ir2red" else "RED→IR"
+        directions = []
+        if train_mode in ("bidirectional", "ir2red"):
+            directions.append((0, ir, red, "IR→RED", prior_red))
+        if train_mode in ("bidirectional", "red2ir"):
+            directions.append((1, red, ir, "RED→IR", prior_ir))
 
-        m = _eval_one_direction_fm(model, src=src, tgt=tgt, label=label, **shared)
-        for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm", "ssim_phys", "ssim_norm", "pearson"):
-            accs[dir_idx][k].extend(m[k])
-        if compute_fid:
-            accs[dir_idx]["fid_real"].append(m["fid_real"])
-            accs[dir_idx]["fid_fake"].append(m["fid_fake"])
-        progress_parts.append(m["progress"])
+        for dir_idx, src, tgt, label, prior_stats in directions:
+            direction = dir_idx if train_mode == "bidirectional" else None
+            m = _eval_one_direction_fm(
+                model, src=src, tgt=tgt, label=label,
+                direction=direction, prior_stats=prior_stats, **shared,
+            )
+            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
+                      "target_range", "rel_mae", "rel_rmse", "scale",
+                      "src_clip", "tgt_clip", "pred_clip",
+                      "ssim_phys", "ssim_norm", "pearson"):
+                accs[dir_idx][k].extend(m[k])
+            if compute_fid:
+                accs[dir_idx]["fid_real"].append(m["fid_real"])
+                accs[dir_idx]["fid_fake"].append(m["fid_fake"])
+            if show_progress:
+                progress_parts.append(m["progress"])
 
         n_done += B
-        print("  |  ".join(progress_parts))
+        if show_progress:
+            print("  |  ".join(progress_parts))
 
     def _avg(lst):
         return float(np.mean(lst)) if lst else float("nan")
@@ -304,6 +345,8 @@ def evaluate_images_fm(
             return float("nan")
         avg_mse = float(np.mean(lst))
         return 10.0 * math.log10(max_val ** 2 / avg_mse) if avg_mse > 0 else 0.0
+    def _pct(lst, q):
+        return float(np.percentile(lst, q)) if lst else float("nan")
 
     a0, a1 = accs[0], accs[1]
     results = dict(
@@ -327,6 +370,29 @@ def evaluate_images_fm(
         # Statistical
         pearson_ir2red   = _avg(a0["pearson"]),
         pearson_red2ir   = _avg(a1["pearson"]),
+        # Normalization and physical-range diagnostics
+        scale_p05_ir2red = _pct(a0["scale"], 5),
+        scale_p50_ir2red = _pct(a0["scale"], 50),
+        scale_p95_ir2red = _pct(a0["scale"], 95),
+        scale_p05_red2ir = _pct(a1["scale"], 5),
+        scale_p50_red2ir = _pct(a1["scale"], 50),
+        scale_p95_red2ir = _pct(a1["scale"], 95),
+        range_p05_ir2red = _pct(a0["target_range"], 5),
+        range_p50_ir2red = _pct(a0["target_range"], 50),
+        range_p95_ir2red = _pct(a0["target_range"], 95),
+        range_p05_red2ir = _pct(a1["target_range"], 5),
+        range_p50_red2ir = _pct(a1["target_range"], 50),
+        range_p95_red2ir = _pct(a1["target_range"], 95),
+        rel_mae_ir2red   = _avg(a0["rel_mae"]),
+        rel_mae_red2ir   = _avg(a1["rel_mae"]),
+        rel_rmse_ir2red  = _avg(a0["rel_rmse"]),
+        rel_rmse_red2ir  = _avg(a1["rel_rmse"]),
+        src_clip_ir2red  = _avg(a0["src_clip"]),
+        src_clip_red2ir  = _avg(a1["src_clip"]),
+        tgt_clip_ir2red  = _avg(a0["tgt_clip"]),
+        tgt_clip_red2ir  = _avg(a1["tgt_clip"]),
+        pred_clip_ir2red = _avg(a0["pred_clip"]),
+        pred_clip_red2ir = _avg(a1["pred_clip"]),
     )
 
     if compute_fid:
@@ -356,6 +422,8 @@ def evaluate_images_fm(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate FM — full image metrics")
     parser.add_argument("--checkpoint",  default="src/output/latest_fm_ir2red.pt")
+    parser.add_argument("--prior_dir",   default="src/output",
+                        help="Directory containing prior_ir.pt and prior_red.pt")
     parser.add_argument("--data_root",   default=r"D:\Imperial\IRP\HiRISE_diffusion\data",
                         help="Data root directory (default: DataConfig.data_root)")
     parser.add_argument("--csv_path",    default=r"D:\Imperial\IRP\HiRISE_diffusion\data\files\data_record_bin12.csv",
@@ -365,23 +433,42 @@ def main() -> None:
     parser.add_argument("--batch_size",  type=int, default=4)
     parser.add_argument("--num_steps",   type=int, default=50,
                         help="Euler ODE steps (0 = FMInferenceConfig default, currently 50)")
+    parser.add_argument("--lambda_sgi_scl", type=float, default=0.0)
+    parser.add_argument("--lambda_sgi_ccl", type=float, default=0.0)
+    parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
     parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster)")
+    parser.add_argument("--show_progress", action="store_true",
+                        help="Print per-batch image metrics during evaluation")
+    parser.add_argument("--no_dc", action="store_true",
+                        help="Disable DiffusionDataset dc subtraction; also selects non-DC priors")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--device",      default="cuda")
     parser.add_argument(
         "--train_mode",
         default="ir2red",
-        choices=["ir2red", "red2ir"],
-        help="Evaluation direction: ir2red or red2ir",
+        choices=["bidirectional", "ir2red", "red2ir"],
+        help="Evaluation mode: bidirectional, ir2red, or red2ir",
     )
     args = parser.parse_args()
 
     cfg_model = FMModelConfig()
     cfg_data  = DataConfig()
     cfg_inf   = FMInferenceConfig()
+    use_dc    = not args.no_dc
     if args.num_steps > 0:
-        cfg_inf = FMInferenceConfig(num_steps=args.num_steps)
+        cfg_inf = FMInferenceConfig(
+            num_steps=args.num_steps,
+            lambda_sgi_scl=args.lambda_sgi_scl,
+            lambda_sgi_ccl=args.lambda_sgi_ccl,
+            sgi_schedule_power=args.sgi_schedule_power,
+        )
+    else:
+        cfg_inf = FMInferenceConfig(
+            lambda_sgi_scl=args.lambda_sgi_scl,
+            lambda_sgi_ccl=args.lambda_sgi_ccl,
+            sgi_schedule_power=args.sgi_schedule_power,
+        )
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -393,12 +480,19 @@ def main() -> None:
     print(f"Checkpoint   : {args.checkpoint}")
     print(f"Mode         : {args.train_mode}")
     print(f"ODE steps    : {cfg_inf.num_steps}")
+    print(f"SGI          : lambda_scl={cfg_inf.lambda_sgi_scl}  "
+          f"lambda_ccl={cfg_inf.lambda_sgi_ccl}  power={cfg_inf.sgi_schedule_power}")
     print(f"Max samples  : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
+    print(f"Progress     : {'shown' if args.show_progress else 'hidden'}")
+    print(f"DC norm      : {'enabled' if use_dc else 'disabled'}")
     print()
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    ModelCls = IR2REDFMUNet if args.train_mode == "ir2red" else RED2IRFMUNet
+    if args.train_mode == "bidirectional":
+        ModelCls = BidirectionalFMUNet
+    else:
+        ModelCls = IR2REDFMUNet if args.train_mode == "ir2red" else RED2IRFMUNet
     model = ModelCls(
         in_channels    = cfg_model.in_channels,
         out_channels   = cfg_model.out_channels,
@@ -418,9 +512,19 @@ def main() -> None:
 
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets,
+        allowed_sets=val_sets, dc=use_dc,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
+
+    prior_red = prior_ir = None
+    if cfg_inf.lambda_sgi_scl > 0.0 or cfg_inf.lambda_sgi_ccl > 0.0:
+        prior_suffix = "_dc" if use_dc else ""
+        prior_red_name = f"prior_red{prior_suffix}.pt"
+        prior_ir_name  = f"prior_ir{prior_suffix}.pt"
+        prior_red = load_prior_stats(os.path.join(args.prior_dir, prior_red_name), device)
+        prior_ir  = load_prior_stats(os.path.join(args.prior_dir, prior_ir_name), device)
+        print(f"Prior RED ({prior_red_name}): mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
+        print(f"Prior IR  ({prior_ir_name}) : mu={prior_ir['mu'].item():.4f}  sigma={prior_ir['sigma'].item():.4f}\n")
 
     # ── Evaluate ──────────────────────────────────────────────────────────────
     results = evaluate_images_fm(
@@ -431,11 +535,16 @@ def main() -> None:
         seed=args.seed,
         compute_fid=not args.no_fid,
         train_mode=args.train_mode,
+        prior_red=prior_red,
+        prior_ir=prior_ir,
+        show_progress=args.show_progress,
     )
 
     # ── Print results table (same format as eval_ddpm.py) ─────────────────────
     def _f4(v):      return f"{v:>10.4f}" if not math.isnan(v) else f"{'—':>10}"
     def _f2(v):      return f"{v:>10.2f}" if not math.isnan(v) else f"{'—':>10}"
+    def _f6(v):      return f"{v:>10.6f}" if not math.isnan(v) else f"{'—':>10}"
+    def _pct(v):     return f"{100.0 * v:>9.3f}%" if not math.isnan(v) else f"{'—':>10}"
     def _avg2(a, b):
         return f"{(a+b)/2:>10.4f}" if not (math.isnan(a) or math.isnan(b)) else f"{'—':>10}"
     def _avg2f2(a, b):
@@ -468,9 +577,26 @@ def main() -> None:
         fid1 = results.get("fid_red2ir", float("nan"))
         print(f"{'FID':<{W}}  {_f2(fid0)}  {_f2(fid1)}  {'—':>10}")
     print(f"{'='*68}")
-    print(f"(n={results['n_samples']}  mode={args.train_mode}  steps={cfg_inf.num_steps})")
+    print(f"{'[Diagnostics]':<{W}}")
+    print(f"{'  scale p05':<{W}}  {_f6(results['scale_p05_ir2red'])}  {_f6(results['scale_p05_red2ir'])}  {'—':>10}")
+    print(f"{'  scale p50':<{W}}  {_f6(results['scale_p50_ir2red'])}  {_f6(results['scale_p50_red2ir'])}  {'—':>10}")
+    print(f"{'  scale p95':<{W}}  {_f6(results['scale_p95_ir2red'])}  {_f6(results['scale_p95_red2ir'])}  {'—':>10}")
+    print(f"{'  range p05':<{W}}  {_f6(results['range_p05_ir2red'])}  {_f6(results['range_p05_red2ir'])}  {'—':>10}")
+    print(f"{'  range p50':<{W}}  {_f6(results['range_p50_ir2red'])}  {_f6(results['range_p50_red2ir'])}  {'—':>10}")
+    print(f"{'  range p95':<{W}}  {_f6(results['range_p95_ir2red'])}  {_f6(results['range_p95_red2ir'])}  {'—':>10}")
+    print(f"{'  rel MAE':<{W}}  {_f4(results['rel_mae_ir2red'])}  {_f4(results['rel_mae_red2ir'])}  "
+          f"{_avg2(results['rel_mae_ir2red'], results['rel_mae_red2ir'])}")
+    print(f"{'  rel RMSE':<{W}}  {_f4(results['rel_rmse_ir2red'])}  {_f4(results['rel_rmse_red2ir'])}  "
+          f"{_avg2(results['rel_rmse_ir2red'], results['rel_rmse_red2ir'])}")
+    print(f"{'  src clamp':<{W}}  {_pct(results['src_clip_ir2red'])}  {_pct(results['src_clip_red2ir'])}  {'—':>10}")
+    print(f"{'  tgt clamp':<{W}}  {_pct(results['tgt_clip_ir2red'])}  {_pct(results['tgt_clip_red2ir'])}  {'—':>10}")
+    print(f"{'  pred clamp':<{W}}  {_pct(results['pred_clip_ir2red'])}  {_pct(results['pred_clip_red2ir'])}  {'—':>10}")
+    print(f"{'='*68}")
+    print(f"(n={results['n_samples']}  mode={args.train_mode}  steps={cfg_inf.num_steps}  "
+          f"λ_sgi_scl={cfg_inf.lambda_sgi_scl}  λ_sgi_ccl={cfg_inf.lambda_sgi_ccl})")
     print(f"  PSNR (normalized, MAX=20) ≡ PSNR (physical, MAX=1.0) under scale=0.05 normalisation")
     print(f"  SSIM physical: per-image GT dynamic range, floor=0.01")
+    print(f"  Diagnostics: range is physical target max-min; relative errors divide by that range.")
 
 
 if __name__ == "__main__":

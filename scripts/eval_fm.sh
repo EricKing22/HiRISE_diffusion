@@ -34,28 +34,33 @@ echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 
 # Evaluation mode: bidirectional | ir2red | red2ir
-# Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl]
+# Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]
 TRAIN_MODE=${1:-ir2red}
 NUM_STEPS=${2:-50}
 LAMBDA_SGI_SCL=${3:-0.0}
 LAMBDA_SGI_CCL=${4:-0.0}
+DC_MODE=${5:-dc}
 
 case "$TRAIN_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl]"
+        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]"
+        exit 1
+        ;;
+esac
+
+case "$DC_MODE" in
+    dc)    DC_ARGS=() ;;
+    no_dc) DC_ARGS=(--no_dc) ;;
+    *)
+        echo "Invalid DC_MODE: $DC_MODE"
+        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]"
         exit 1
         ;;
 esac
 
 CHECKPOINT=${CKPT_DIR}/latest_fm_${TRAIN_MODE}.pt
-
-echo "Checkpoint   : $CHECKPOINT"
-echo "Train mode   : $TRAIN_MODE"
-echo "ODE steps    : $NUM_STEPS"
-echo "SGI          : lambda_scl=$LAMBDA_SGI_SCL  lambda_ccl=$LAMBDA_SGI_CCL"
-echo ""
 
 python src/eval_fm.py \
     --checkpoint  $CHECKPOINT  \
@@ -66,7 +71,8 @@ python src/eval_fm.py \
     --num_steps   $NUM_STEPS   \
     --lambda_sgi_scl $LAMBDA_SGI_SCL \
     --lambda_sgi_ccl $LAMBDA_SGI_CCL \
-    --batch_size  64           \
+    "${DC_ARGS[@]}"        \
+    --batch_size  16           \
     --no_fid
 
 end_time=$(date +%s)

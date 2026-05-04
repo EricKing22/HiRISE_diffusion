@@ -144,10 +144,13 @@ def main() -> None:
     parser.add_argument("--lambda_sgi_scl", type=float, default=0.0)
     parser.add_argument("--lambda_sgi_ccl", type=float, default=0.0)
     parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
+    parser.add_argument("--no_dc", action="store_true",
+                        help="Disable source dc subtraction; also selects non-DC priors")
     parser.add_argument("--device",      default="cuda")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    use_dc = not args.no_dc
     print(f"Device: {device}")
 
     cfg_model = FMModelConfig()
@@ -196,7 +199,9 @@ def main() -> None:
             target_direction = 0
         else:
             target_direction = args.direction
-        prior_name = "prior_red.pt" if target_direction == 0 else "prior_ir.pt"
+        prior_suffix = "_dc" if use_dc else ""
+        prior_modality = "red" if target_direction == 0 else "ir"
+        prior_name = f"prior_{prior_modality}{prior_suffix}.pt"
         prior_stats = load_prior_stats(os.path.join(args.prior_dir, prior_name), device)
         print(f"[prior] {prior_name}: mu={prior_stats['mu'].item():.4f}  "
               f"sigma={prior_stats['sigma'].item():.4f}")
@@ -234,9 +239,13 @@ def main() -> None:
     scale  = (1.4826 * mad).clamp_min(0.05)
     x_source = ((x_source - center) / scale).clamp(-10, 10)
 
-    dc = ((flat - center) / scale).clamp(-10, 10).mean()
-    x_source = x_source - dc
-    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  dc={dc.item():.4f}")
+    if use_dc:
+        dc = ((flat - center) / scale).clamp(-10, 10).mean()
+        x_source = x_source - dc
+    else:
+        dc = torch.zeros((), dtype=x_source.dtype)
+    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  "
+          f"dc={dc.item():.4f}  dc_norm={'enabled' if use_dc else 'disabled'}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "

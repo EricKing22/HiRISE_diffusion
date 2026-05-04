@@ -319,7 +319,8 @@ def _eval_one_direction(
                       verbose=False, edge_mode=edge_mode,
                       dexined_model=dexined_model)
 
-    pred_norm = pred.clamp(-10.0, 10.0)
+    pred_raw  = pred
+    pred_norm = pred_raw.clamp(-10.0, 10.0)
     pred_phys = (pred_norm + dc) * scale + center
     tgt_phys  = (tgt       + dc) * scale + center
 
@@ -327,6 +328,13 @@ def _eval_one_direction(
     mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
     mse_norm_b = F.mse_loss(pred_norm, tgt,       reduction="none").mean(dim=[1,2,3])
     mae_norm_b = F.l1_loss( pred_norm, tgt,        reduction="none").mean(dim=[1,2,3])
+    target_range_b = (tgt_phys.amax(dim=[1, 2, 3]) - tgt_phys.amin(dim=[1, 2, 3])).clamp_min(1e-6)
+    rel_mae_b = mae_phys_b / target_range_b
+    rel_rmse_b = torch.sqrt(mse_phys_b.clamp_min(0.0)) / target_range_b
+    scale_b = scale.flatten()
+    src_clip_b = (src.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    tgt_clip_b = (tgt.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    pred_clip_b = (pred_raw.abs() >= 9.999).float().mean(dim=[1, 2, 3])
 
     ssim_phy_vals, ssim_norm_vals = [], []
     for i in range(B):
@@ -347,6 +355,13 @@ def _eval_one_direction(
         mae_phys  = mae_phys_b.cpu().tolist(),
         mse_norm  = mse_norm_b.cpu().tolist(),
         mae_norm  = mae_norm_b.cpu().tolist(),
+        target_range = target_range_b.cpu().tolist(),
+        rel_mae      = rel_mae_b.cpu().tolist(),
+        rel_rmse     = rel_rmse_b.cpu().tolist(),
+        scale        = scale_b.cpu().tolist(),
+        src_clip     = src_clip_b.cpu().tolist(),
+        tgt_clip     = tgt_clip_b.cpu().tolist(),
+        pred_clip    = pred_clip_b.cpu().tolist(),
         ssim_phys = ssim_phy_vals,
         ssim_norm = ssim_norm_vals,
         pearson   = pearson_b.cpu().tolist(),
@@ -372,6 +387,7 @@ def evaluate_images(
     edge_mode:      str = "sobel",
     dexined_model:  torch.nn.Module = None,
     train_mode:     str = "bidirectional",
+    show_progress:  bool = False,
 ) -> dict:
     """
     Image-level evaluation: full T-step reverse diffusion in batches.
@@ -394,6 +410,8 @@ def evaluate_images(
 
     # Per-direction accumulators — index 0 = IR→RED, index 1 = RED→IR
     accs = [{k: [] for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
+                              "target_range", "rel_mae", "rel_rmse", "scale",
+                              "src_clip", "tgt_clip", "pred_clip",
                               "ssim_norm", "ssim_phys", "pearson",
                               "fid_real",  "fid_fake")}
             for _ in range(2)]
@@ -421,34 +439,43 @@ def evaluate_images(
                       dexined_model=dexined_model,
                       compute_fid=compute_fid, inception=inception)
 
-        progress_parts = [f"  [{n_done + B}/{n}]"]
+        progress_parts = [f"  [{n_done + B}/{n}]"] if show_progress else None
 
         if train_mode in ("bidirectional", "ir2red"):
             d = 0 if train_mode == "bidirectional" else None
             m = _eval_one_direction(model, scheduler, src=ir, tgt=red,
                                     direction=d, prior=prior_red,
                                     label="IR→RED", **shared)
-            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm", "ssim_phys", "ssim_norm", "pearson"):
+            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
+                      "target_range", "rel_mae", "rel_rmse", "scale",
+                      "src_clip", "tgt_clip", "pred_clip",
+                      "ssim_phys", "ssim_norm", "pearson"):
                 accs[0][k].extend(m[k])
             if compute_fid:
                 accs[0]["fid_real"].append(m["fid_real"])
                 accs[0]["fid_fake"].append(m["fid_fake"])
-            progress_parts.append(m["progress"])
+            if show_progress:
+                progress_parts.append(m["progress"])
 
         if train_mode in ("bidirectional", "red2ir"):
             d = 1 if train_mode == "bidirectional" else None
             m = _eval_one_direction(model, scheduler, src=red, tgt=ir,
                                     direction=d, prior=prior_ir,
                                     label="RED→IR", **shared)
-            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm", "ssim_phys", "ssim_norm", "pearson"):
+            for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
+                      "target_range", "rel_mae", "rel_rmse", "scale",
+                      "src_clip", "tgt_clip", "pred_clip",
+                      "ssim_phys", "ssim_norm", "pearson"):
                 accs[1][k].extend(m[k])
             if compute_fid:
                 accs[1]["fid_real"].append(m["fid_real"])
                 accs[1]["fid_fake"].append(m["fid_fake"])
-            progress_parts.append(m["progress"])
+            if show_progress:
+                progress_parts.append(m["progress"])
 
         n_done += B
-        print("  |  ".join(progress_parts))
+        if show_progress:
+            print("  |  ".join(progress_parts))
 
     def _avg(lst):
         return float(np.mean(lst)) if lst else float("nan")
@@ -457,6 +484,8 @@ def evaluate_images(
             return float("nan")
         avg_mse = float(np.mean(lst))
         return 10.0 * math.log10(max_val ** 2 / avg_mse) if avg_mse > 0 else 0.0
+    def _pct(lst, q):
+        return float(np.percentile(lst, q)) if lst else float("nan")
 
     a0, a1 = accs[0], accs[1]
     results = dict(
@@ -480,6 +509,29 @@ def evaluate_images(
         # Statistical
         pearson_ir2red   = _avg(a0["pearson"]),
         pearson_red2ir   = _avg(a1["pearson"]),
+        # Normalization and physical-range diagnostics
+        scale_p05_ir2red = _pct(a0["scale"], 5),
+        scale_p50_ir2red = _pct(a0["scale"], 50),
+        scale_p95_ir2red = _pct(a0["scale"], 95),
+        scale_p05_red2ir = _pct(a1["scale"], 5),
+        scale_p50_red2ir = _pct(a1["scale"], 50),
+        scale_p95_red2ir = _pct(a1["scale"], 95),
+        range_p05_ir2red = _pct(a0["target_range"], 5),
+        range_p50_ir2red = _pct(a0["target_range"], 50),
+        range_p95_ir2red = _pct(a0["target_range"], 95),
+        range_p05_red2ir = _pct(a1["target_range"], 5),
+        range_p50_red2ir = _pct(a1["target_range"], 50),
+        range_p95_red2ir = _pct(a1["target_range"], 95),
+        rel_mae_ir2red   = _avg(a0["rel_mae"]),
+        rel_mae_red2ir   = _avg(a1["rel_mae"]),
+        rel_rmse_ir2red  = _avg(a0["rel_rmse"]),
+        rel_rmse_red2ir  = _avg(a1["rel_rmse"]),
+        src_clip_ir2red  = _avg(a0["src_clip"]),
+        src_clip_red2ir  = _avg(a1["src_clip"]),
+        tgt_clip_ir2red  = _avg(a0["tgt_clip"]),
+        tgt_clip_red2ir  = _avg(a1["tgt_clip"]),
+        pred_clip_ir2red = _avg(a0["pred_clip"]),
+        pred_clip_red2ir = _avg(a1["pred_clip"]),
     )
 
     if compute_fid:
@@ -534,6 +586,8 @@ def main() -> None:
     parser.add_argument("--lambda_ccl",  type=float, default=0.0)
     parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster, no torchvision needed)")
+    parser.add_argument("--show_progress", action="store_true",
+                        help="Print per-batch image metrics during evaluation")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--device",      default="cuda")
     parser.add_argument(
@@ -553,6 +607,7 @@ def main() -> None:
     cfg_model = DDPMModelConfig()
     cfg_data  = DataConfig()
     cfg_inf   = DDPMInferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
+    use_dc    = not args.no_dc
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -565,6 +620,8 @@ def main() -> None:
     print(f"SCI          : lambda_scl={args.lambda_scl}  lambda_ccl={args.lambda_ccl}")
     print(f"Max samples  : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
+    print(f"Progress     : {'shown' if args.show_progress else 'hidden'}")
+    print(f"DC norm      : {'enabled' if use_dc else 'disabled'}")
     print()
 
     if args.train_mode == "bidirectional":
@@ -607,17 +664,20 @@ def main() -> None:
         beta_end=cfg_model.beta_end,
     ).to(device)
 
-    prior_red = load_prior_stats(os.path.join(args.prior_dir, "prior_red.pt"), device)
-    prior_ir  = load_prior_stats(os.path.join(args.prior_dir, "prior_ir.pt"),  device)
-    print(f"Prior RED: mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
-    print(f"Prior IR:  mu={prior_ir['mu'].item():.4f}  sigma={prior_ir['sigma'].item():.4f}")
+    prior_suffix = "_dc" if use_dc else ""
+    prior_red_name = f"prior_red{prior_suffix}.pt"
+    prior_ir_name  = f"prior_ir{prior_suffix}.pt"
+    prior_red = load_prior_stats(os.path.join(args.prior_dir, prior_red_name), device)
+    prior_ir  = load_prior_stats(os.path.join(args.prior_dir, prior_ir_name),  device)
+    print(f"Prior RED ({prior_red_name}): mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
+    print(f"Prior IR  ({prior_ir_name}) : mu={prior_ir['mu'].item():.4f}  sigma={prior_ir['sigma'].item():.4f}")
 
     dr = pd.read_csv(csv_path)
     _, val_sets = get_val_split(dr)
 
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets, dc=not args.no_dc,
+        allowed_sets=val_sets, dc=use_dc,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
 
@@ -632,10 +692,13 @@ def main() -> None:
         edge_mode=args.edge_mode,
         dexined_model=dexined_model,
         train_mode=args.train_mode,
+        show_progress=args.show_progress,
     )
 
     def _f4(v):  return f"{v:>10.4f}" if not math.isnan(v) else f"{'—':>10}"
     def _f2(v):  return f"{v:>10.2f}" if not math.isnan(v) else f"{'—':>10}"
+    def _f6(v):  return f"{v:>10.6f}" if not math.isnan(v) else f"{'—':>10}"
+    def _pct(v): return f"{100.0 * v:>9.3f}%" if not math.isnan(v) else f"{'—':>10}"
     def _avg2(a, b): return f"{(a+b)/2:>10.4f}" if not (math.isnan(a) or math.isnan(b)) else f"{'—':>10}"
     def _avg2f2(a, b): return f"{(a+b)/2:>10.2f}" if not (math.isnan(a) or math.isnan(b)) else f"{'—':>10}"
 
@@ -666,9 +729,25 @@ def main() -> None:
         fid1 = results.get("fid_red2ir", float("nan"))
         print(f"{'FID':<{W}}  {_f2(fid0)}  {_f2(fid1)}  {'—':>10}")
     print(f"{'='*68}")
+    print(f"{'[Diagnostics]':<{W}}")
+    print(f"{'  scale p05':<{W}}  {_f6(results['scale_p05_ir2red'])}  {_f6(results['scale_p05_red2ir'])}  {'—':>10}")
+    print(f"{'  scale p50':<{W}}  {_f6(results['scale_p50_ir2red'])}  {_f6(results['scale_p50_red2ir'])}  {'—':>10}")
+    print(f"{'  scale p95':<{W}}  {_f6(results['scale_p95_ir2red'])}  {_f6(results['scale_p95_red2ir'])}  {'—':>10}")
+    print(f"{'  range p05':<{W}}  {_f6(results['range_p05_ir2red'])}  {_f6(results['range_p05_red2ir'])}  {'—':>10}")
+    print(f"{'  range p50':<{W}}  {_f6(results['range_p50_ir2red'])}  {_f6(results['range_p50_red2ir'])}  {'—':>10}")
+    print(f"{'  range p95':<{W}}  {_f6(results['range_p95_ir2red'])}  {_f6(results['range_p95_red2ir'])}  {'—':>10}")
+    print(f"{'  rel MAE':<{W}}  {_f4(results['rel_mae_ir2red'])}  {_f4(results['rel_mae_red2ir'])}  "
+          f"{_avg2(results['rel_mae_ir2red'], results['rel_mae_red2ir'])}")
+    print(f"{'  rel RMSE':<{W}}  {_f4(results['rel_rmse_ir2red'])}  {_f4(results['rel_rmse_red2ir'])}  "
+          f"{_avg2(results['rel_rmse_ir2red'], results['rel_rmse_red2ir'])}")
+    print(f"{'  src clamp':<{W}}  {_pct(results['src_clip_ir2red'])}  {_pct(results['src_clip_red2ir'])}  {'—':>10}")
+    print(f"{'  tgt clamp':<{W}}  {_pct(results['tgt_clip_ir2red'])}  {_pct(results['tgt_clip_red2ir'])}  {'—':>10}")
+    print(f"{'  pred clamp':<{W}}  {_pct(results['pred_clip_ir2red'])}  {_pct(results['pred_clip_red2ir'])}  {'—':>10}")
+    print(f"{'='*68}")
     print(f"(n={results['n_samples']}  mode={args.train_mode}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
     print(f"  PSNR (normalized, MAX=20) ≡ PSNR (physical, MAX=1.0) under scale=0.05 normalisation")
     print(f"  SSIM physical: per-image GT dynamic range, floor=0.01")
+    print(f"  Diagnostics: range is physical target max-min; relative errors divide by that range.")
 
 
 if __name__ == "__main__":

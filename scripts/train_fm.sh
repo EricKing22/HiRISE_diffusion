@@ -46,6 +46,10 @@ echo "Project root : $PROJECT_ROOT"
 echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 
+RUN_NOTE="Retrain bidirectional FM with DiffusionDataset dc=True so IR is centered near zero after normalization and SGI priors are aligned with the trained data distribution."
+echo "Run note     : $RUN_NOTE"
+echo "DC norm      : enabled via DiffusionDataset default dc=True"
+
 # Training mode switch:
 #   bidirectional | ir2red (default) | red2ir
 TRAIN_MODE=${1:-ir2red}

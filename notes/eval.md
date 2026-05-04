@@ -273,11 +273,47 @@ These are mathematically identical. Physical and normalized PSNR are redundant f
 - For reporting: note that MSE/PSNR improvements above ~λ=100 are dominated by global moment matching, not structural improvement
 - Consider computing metrics after **per-image mean/variance normalization** to factor out the SCI statistical correction and reveal true structural quality
 
+### Physical-range diagnostics
+
+`src/eval_ddpm.py` and `src/eval_fm.py` now print a `[Diagnostics]` block after the main metric table. These diagnostics are meant to explain whether a physical-domain error is large relative to the actual signal in the target patch.
+
+The dataset denormalizes with:
+
+```
+x_phys = (x_norm + dc) * scale + center
+```
+
+Therefore:
+
+```
+MAE_phys  = scale * MAE_norm
+MSE_phys  = scale² * MSE_norm
+RMSE_phys = scale * RMSE_norm
+```
+
+For the current data, many patches hit the `scale = 0.05` robust-scale floor. Absolute physical MSE/MAE can look numerically small while still being severe if the physical target range is only a few thousandths. The diagnostic block reports:
+
+- `scale p05/p50/p95`: percentiles of the per-scene normalization scale. If these sit at `0.05`, the MAD floor dominates normalization and normalized metrics are being mapped back with a fixed multiplier.
+- `range p05/p50/p95`: percentiles of the physical target dynamic range (`target.max() - target.min()`). This tells you whether the patch has enough physical contrast for absolute MAE/MSE to be meaningful.
+- `rel MAE`: `MAE_phys / max(target_range, 1e-6)`. This is the average absolute error as a fraction of the target signal span.
+- `rel RMSE`: `RMSE_phys / max(target_range, 1e-6)`. This is the same idea but penalizes larger local errors more strongly.
+- `src clamp`, `tgt clamp`, `pred clamp`: average fraction of pixels at the normalized clamp boundary (`abs(x) >= 9.999`). Source/target clamp indicates the dataset normalization is saturating real pixels. Prediction clamp indicates the model is producing values outside the trained normalized range.
+
+These diagnostics answer a different question from the main metrics:
+
+- Main physical MSE/MAE: "How large is the error in raw units?"
+- Normalized MSE/MAE: "How large is the error in training units?"
+- Relative MAE/RMSE: "How large is the error compared with the physical signal available in this target patch?"
+- Clamp rates: "Are metrics being distorted by normalization saturation?"
+
+For very low-dynamic-range HiRISE patches, relative MAE/RMSE and physical SSIM are usually more informative than absolute physical MAE alone.
+
 ---
 
 ## Implementation
 
 - `evaluate_images()` in `src/eval_ddpm.py` computes all metrics batch-by-batch
+- `evaluate_images_fm()` in `src/eval_fm.py` mirrors the image metrics and physical-range diagnostics for Flow Matching
 - DDPM outputs clamped to `[-10, 10]` before any metric computation (suppresses outlier explosion from 1000-step numerical drift)
 - Denormalization: `x_phys = (clamp(x, -10, 10) + dc) × scale + center` using per-sample `norm_stats` (3,) = [center, scale, dc]
 - Physical PSNR: `10·log10(1.0² / mean(MSE_phys))` | Normalized PSNR: `10·log10(20² / mean(MSE_norm))`
