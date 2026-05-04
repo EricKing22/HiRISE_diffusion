@@ -23,9 +23,9 @@ import wandb
 sys.path.insert(0, os.path.dirname(__file__))
 
 from config import FMModelConfig, FMTrainConfig, DataConfig
-from models import IR2REDFMUNet, RED2IRFMUNet
+from models import IR2REDFMUNet, RED2IRFMUNet, BidirectionalFMUNet
 from diffusion.fm_utils import fm_interpolate, fm_velocity_target
-from eval_fm import evaluate_fm_unidirectional
+from eval_fm import evaluate_fm, evaluate_fm_unidirectional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from data.dataset import DiffusionDataset, diffusion_collate_fn, get_loader
@@ -78,7 +78,16 @@ def fm_train_step(
     red = batch["red"].to(device)
     B   = ir.shape[0]
 
-    if train_mode == "ir2red":
+    if train_mode == "bidirectional":
+        n_ir2red = (B + 1) // 2
+        direction = torch.cat([
+            torch.zeros(n_ir2red,        dtype=torch.long, device=device),
+            torch.ones(B - n_ir2red,     dtype=torch.long, device=device),
+        ])
+        mask     = (direction == 0)[:, None, None, None]
+        x_source = torch.where(mask, ir, red)
+        x_target = torch.where(mask, red, ir)
+    elif train_mode == "ir2red":
         x_source, x_target = ir, red
     elif train_mode == "red2ir":
         x_source, x_target = red, ir
@@ -89,6 +98,15 @@ def fm_train_step(
     noise = torch.randn_like(x_target)
     x_t      = fm_interpolate(x_target, noise, t)
     v_target = fm_velocity_target(x_target, noise)
+
+    if train_mode == "bidirectional":
+        v_pred = model(x_t, x_source, direction, t)
+        loss_per_sample = F.mse_loss(v_pred, v_target, reduction="none").mean(dim=[1, 2, 3])
+        mask_1d = (direction == 0)
+        loss_ir2red = loss_per_sample[mask_1d].mean()
+        loss_red2ir = loss_per_sample[~mask_1d].mean() if (~mask_1d).any() else loss_ir2red.new_tensor(0.0)
+        loss = loss_ir2red + loss_red2ir
+        return loss, loss_ir2red.item(), loss_red2ir.item()
 
     v_pred = model(x_t, x_source, t)
     loss   = F.mse_loss(v_pred, v_target)
@@ -115,8 +133,8 @@ def main() -> None:
     parser.add_argument(
         "--train_mode",
         default="ir2red",
-        choices=["ir2red", "red2ir"],
-        help="Training direction (unidirectional only)",
+        choices=["bidirectional", "ir2red", "red2ir"],
+        help="Training mode: shared bidirectional FM model or single-direction FM",
     )
     args = parser.parse_args()
 
@@ -128,7 +146,17 @@ def main() -> None:
     print(f"Device: {device}")
 
     # ── Model ─────────────────────────────────────────────────────────────
-    if args.train_mode == "red2ir":
+    if args.train_mode == "bidirectional":
+        model = BidirectionalFMUNet(
+            in_channels    = cfg_model.in_channels,
+            out_channels   = cfg_model.out_channels,
+            base_channels  = cfg_model.base_channels,
+            num_res_blocks = cfg_model.num_res_blocks,
+            dropout        = cfg_model.dropout,
+            t_scale        = cfg_model.t_scale,
+        ).to(device)
+        model_tag = "bidirectional_fm"
+    elif args.train_mode == "red2ir":
         model = RED2IRFMUNet(
             in_channels    = cfg_model.in_channels,
             out_channels   = cfg_model.out_channels,
@@ -287,9 +315,12 @@ def main() -> None:
 
         # ── Validation ────────────────────────────────────────────────────
         if step % cfg_train.val_every == 0:
-            val_results = evaluate_fm_unidirectional(
-                model, val_loader, device, args.train_mode,
-            )
+            if args.train_mode == "bidirectional":
+                val_results = evaluate_fm(model, val_loader, device)
+            else:
+                val_results = evaluate_fm_unidirectional(
+                    model, val_loader, device, args.train_mode,
+                )
             print(f"  [val] step {step:>6}  loss={val_results['loss']:.4f}  "
                   f"ir2red={val_results['loss_ir2red']:.4f}  red2ir={val_results['loss_red2ir']:.4f}")
             if use_wandb:

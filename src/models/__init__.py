@@ -11,6 +11,7 @@ from .ir2red_ddpm import IR2REDDDPMUNet
 from .red2ir_ddpm import RED2IRDDPMUNet
 from .ir2red_fm import IR2REDFMUNet
 from .red2ir_fm import RED2IRFMUNet
+from .bidirectional_fm import BidirectionalFMUNet
 from .dexined import DexiNed
 
 __all__ = [
@@ -19,6 +20,7 @@ __all__ = [
     "RED2IRDDPMUNet",
     "IR2REDFMUNet",
     "RED2IRFMUNet",
+    "BidirectionalFMUNet",
     "SinusoidalTimeEmbedding",
     "DirectionEmbedding",
     "ResBlock",

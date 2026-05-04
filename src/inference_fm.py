@@ -1,9 +1,10 @@
 """
 Flow Matching inference via Euler ODE integration.
 
-Generates a target-domain image from a source image using a trained
-IR2REDFMUNet velocity network.  Starts from x_0 ~ N(0, I) and integrates
-the learned velocity field to x_1 (clean image).
+Generates a target-domain image from a source image using a trained FM velocity
+network. Starts from x_0 ~ N(0, I) and integrates the learned velocity field to
+x_1 (clean image). Optional SGI guidance can constrain x_1 estimates with
+global target-domain priors.
 
 Usage:
     cd src
@@ -23,8 +24,9 @@ import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import FMModelConfig, FMInferenceConfig
-from models import IR2REDFMUNet
+from models import IR2REDFMUNet, RED2IRFMUNet, BidirectionalFMUNet
 from diffusion.fm_utils import fm_euler_step
+from compute_prior import load_prior_stats, sci_l_scl, sci_l_ccl
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -38,6 +40,8 @@ def sample_fm(
     x_source: torch.Tensor,       # [B, 1, H, W]
     cfg_inf:  FMInferenceConfig,
     device:   torch.device,
+    direction=None,               # int or [B] tensor for bidirectional models
+    prior_stats: dict | None = None,
     verbose:  bool = True,
 ) -> torch.Tensor:
     """
@@ -53,16 +57,60 @@ def sample_fm(
 
     x_t = torch.randn(B, 1, H, W, device=device)
     dt  = 1.0 / cfg_inf.num_steps
+    use_guidance = (
+        prior_stats is not None
+        and (cfg_inf.lambda_sgi_scl > 0.0 or cfg_inf.lambda_sgi_ccl > 0.0)
+    )
+
+    if direction is None:
+        direction_t = None
+    elif torch.is_tensor(direction):
+        direction_t = direction.to(device=device, dtype=torch.long)
+    else:
+        direction_t = torch.full((B,), int(direction), dtype=torch.long, device=device)
+
+    def model_forward(x_state: torch.Tensor, t_batch: torch.Tensor) -> torch.Tensor:
+        if direction_t is None:
+            return model(x_state, x_source, t_batch)
+        return model(x_state, x_source, direction_t, t_batch)
 
     if verbose:
-        print(f"[FM] Euler ODE: {cfg_inf.num_steps} steps, dt={dt:.4f}")
+        guide_msg = (
+            f", SGI λ_scl={cfg_inf.lambda_sgi_scl:g} λ_ccl={cfg_inf.lambda_sgi_ccl:g}"
+            if use_guidance else ""
+        )
+        print(f"[FM] Euler ODE: {cfg_inf.num_steps} steps, dt={dt:.4f}{guide_msg}")
 
     for step_idx in range(cfg_inf.num_steps):
         t_val   = step_idx * dt
         t_batch = torch.full((B,), t_val, device=device)
 
-        with torch.no_grad():
-            v_pred = model(x_t, x_source, t_batch)
+        if use_guidance:
+            with torch.enable_grad():
+                x_t_req = x_t.detach().requires_grad_(True)
+                v_pred = model_forward(x_t_req, t_batch)
+                x1_hat = x_t_req + (1.0 - t_val) * v_pred
+
+                loss_sgi = x1_hat.new_tensor(0.0)
+                if cfg_inf.lambda_sgi_scl > 0.0:
+                    loss_sgi = loss_sgi + cfg_inf.lambda_sgi_scl * sci_l_scl(
+                        x1_hat, prior_stats["mu"], prior_stats["sigma"],
+                    )
+                if cfg_inf.lambda_sgi_ccl > 0.0:
+                    loss_sgi = loss_sgi + cfg_inf.lambda_sgi_ccl * sci_l_ccl(
+                        x1_hat,
+                        prior_stats["histogram"],
+                        int(prior_stats["bins"].item()),
+                        hist_min=float(prior_stats["hist_min"].item()),
+                        hist_max=float(prior_stats["hist_max"].item()),
+                    )
+
+                grad = torch.autograd.grad(loss_sgi, x_t_req, retain_graph=False)[0]
+                lambda_t = float(t_val ** cfg_inf.sgi_schedule_power)
+                v_pred = (v_pred - lambda_t * grad).detach()
+        else:
+            with torch.no_grad():
+                v_pred = model_forward(x_t, t_batch)
 
         x_t = fm_euler_step(v_pred, x_t, dt)
 
@@ -83,10 +131,19 @@ def main() -> None:
                         help="Source image path (.npy)")
     parser.add_argument("--checkpoint",  default="src/output/latest_fm_ir2red.pt",
                         help="Path to FM model checkpoint (.pt)")
+    parser.add_argument("--train_mode",  default="ir2red",
+                        choices=["bidirectional", "ir2red", "red2ir"])
+    parser.add_argument("--direction",   type=int, default=0, choices=[0, 1],
+                        help="For bidirectional checkpoints: 0=IR10->RED4, 1=RED4->IR10")
+    parser.add_argument("--prior_dir",   default="src/output",
+                        help="Directory containing prior_ir.pt and prior_red.pt")
     parser.add_argument("--output",      default="../outputs/fm_result.npy",
                         help="Output path (.npy)")
     parser.add_argument("--num_steps",   type=int, default=0,
                         help="Euler ODE steps (0 = use FMInferenceConfig default)")
+    parser.add_argument("--lambda_sgi_scl", type=float, default=0.0)
+    parser.add_argument("--lambda_sgi_ccl", type=float, default=0.0)
+    parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
     parser.add_argument("--device",      default="cuda")
     args = parser.parse_args()
 
@@ -96,10 +153,28 @@ def main() -> None:
     cfg_model = FMModelConfig()
     cfg_inf   = FMInferenceConfig()
     if args.num_steps > 0:
-        cfg_inf = FMInferenceConfig(num_steps=args.num_steps)
+        cfg_inf = FMInferenceConfig(
+            num_steps=args.num_steps,
+            lambda_sgi_scl=args.lambda_sgi_scl,
+            lambda_sgi_ccl=args.lambda_sgi_ccl,
+            sgi_schedule_power=args.sgi_schedule_power,
+        )
+    else:
+        cfg_inf = FMInferenceConfig(
+            lambda_sgi_scl=args.lambda_sgi_scl,
+            lambda_sgi_ccl=args.lambda_sgi_ccl,
+            sgi_schedule_power=args.sgi_schedule_power,
+        )
 
     # ── Model ─────────────────────────────────────────────────────────────
-    model = IR2REDFMUNet(
+    if args.train_mode == "bidirectional":
+        ModelCls = BidirectionalFMUNet
+    elif args.train_mode == "red2ir":
+        ModelCls = RED2IRFMUNet
+    else:
+        ModelCls = IR2REDFMUNet
+
+    model = ModelCls(
         in_channels    = cfg_model.in_channels,
         out_channels   = cfg_model.out_channels,
         base_channels  = cfg_model.base_channels,
@@ -112,6 +187,19 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded checkpoint  step={ckpt.get('step', '?')}  loss={ckpt.get('loss', '?'):.4f}")
+
+    prior_stats = None
+    if cfg_inf.lambda_sgi_scl > 0.0 or cfg_inf.lambda_sgi_ccl > 0.0:
+        if args.train_mode == "red2ir":
+            target_direction = 1
+        elif args.train_mode == "ir2red":
+            target_direction = 0
+        else:
+            target_direction = args.direction
+        prior_name = "prior_red.pt" if target_direction == 0 else "prior_ir.pt"
+        prior_stats = load_prior_stats(os.path.join(args.prior_dir, prior_name), device)
+        print(f"[prior] {prior_name}: mu={prior_stats['mu'].item():.4f}  "
+              f"sigma={prior_stats['sigma'].item():.4f}")
 
     # ── Source image ──────────────────────────────────────────────────────
     src_np   = np.load(args.source).astype(np.float32)
@@ -157,7 +245,12 @@ def main() -> None:
     # ── Inference ─────────────────────────────────────────────────────────
     print(f"Sampling (FM Euler, N={cfg_inf.num_steps}) ...")
 
-    result = sample_fm(model, x_source, cfg_inf, device)
+    direction = args.direction if args.train_mode == "bidirectional" else None
+    result = sample_fm(
+        model, x_source, cfg_inf, device,
+        direction=direction,
+        prior_stats=prior_stats,
+    )
 
     # Restore dc offset.
     result = result + dc.to(device)

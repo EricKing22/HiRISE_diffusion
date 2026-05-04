@@ -47,13 +47,13 @@ echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 
 # Training mode switch:
-#   ir2red (default) | red2ir
+#   bidirectional | ir2red (default) | red2ir
 TRAIN_MODE=${1:-ir2red}
 case "$TRAIN_MODE" in
-    ir2red|red2ir) ;;
+    bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch train_fm.sh [ir2red|red2ir]"
+        echo "Usage: sbatch train_fm.sh [bidirectional|ir2red|red2ir]"
         exit 1
         ;;
 esac
@@ -67,7 +67,9 @@ echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
 echo "Train mode              : $TRAIN_MODE"
 echo ""
 
-if [ "$TRAIN_MODE" = "ir2red" ]; then
+if [ "$TRAIN_MODE" = "bidirectional" ]; then
+    wandb_project=HiRISE_diffusion_fm_bidirectional
+elif [ "$TRAIN_MODE" = "ir2red" ]; then
     wandb_project=HiRISE_diffusion_fm_ir2red
 else
     wandb_project=HiRISE_diffusion_fm_red2ir

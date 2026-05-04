@@ -33,6 +33,7 @@ def test_top_level_modules_import(module_name: str) -> None:
         "models.red2ir_ddpm",
         "models.ir2red_fm",
         "models.red2ir_fm",
+        "models.bidirectional_fm",
     ],
 )
 def test_model_modules_import(module_name: str) -> None:
@@ -48,6 +49,7 @@ def test_models_exports_explicit_ddpm_and_fm_names() -> None:
         "RED2IRDDPMUNet",
         "IR2REDFMUNet",
         "RED2IRFMUNet",
+        "BidirectionalFMUNet",
     ):
         assert hasattr(models, name)
 

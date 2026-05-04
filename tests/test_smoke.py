@@ -9,15 +9,18 @@ a full training run.
 import pytest
 import torch
 
-from config import DDPMModelConfig, DDPMTrainConfig, DDPMInferenceConfig
+from config import DDPMModelConfig, DDPMTrainConfig, DDPMInferenceConfig, FMInferenceConfig
 from models import (
     BidirectionalDDPMUNet,
+    BidirectionalFMUNet,
     SinusoidalTimeEmbedding,
     DirectionEmbedding,
     ResBlock,
     CrossAttentionBlock,
     ModalityEncoder,
 )
+from inference_fm import sample_fm
+from train_fm import fm_train_step
 
 B = 2       # batch size used across all tests
 C = 64      # smallest base_channels where C//2=32 is divisible by GroupNorm groups=32
@@ -200,3 +203,88 @@ def test_unet_gradients_flow(unet_inputs) -> None:
         if p.requires_grad and p.grad is None
     ]
     assert not no_grad, f"No gradient for: {no_grad[:5]}"
+
+
+# =============================================================================
+# Bidirectional FM U-Net and sampler
+# =============================================================================
+
+@pytest.fixture
+def fm_inputs():
+    x_t       = torch.randn(B, 1, 256, 256)
+    x_src     = torch.randn(B, 1, 256, 256)
+    direction = torch.tensor([0, 1], dtype=torch.long)
+    t         = torch.rand(B)
+    return x_t, x_src, direction, t
+
+
+def test_bidirectional_fm_output_shape(fm_inputs) -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    out = model(*fm_inputs)
+    assert out.shape == (B, 1, 256, 256)
+
+
+def test_bidirectional_fm_output_is_finite(fm_inputs) -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    out = model(*fm_inputs)
+    assert torch.isfinite(out).all(), "BidirectionalFMUNet output contains NaN or Inf"
+
+
+def test_bidirectional_fm_both_directions(fm_inputs) -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    x_t, x_src, _, t = fm_inputs
+    out0 = model(x_t, x_src, torch.zeros(B, dtype=torch.long), t)
+    out1 = model(x_t, x_src, torch.ones(B, dtype=torch.long), t)
+    assert not torch.allclose(out0, out1), "Both FM directions produced identical output"
+
+
+def test_bidirectional_fm_train_step() -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    batch = {
+        "ir": torch.randn(B, 1, 256, 256),
+        "red": torch.randn(B, 1, 256, 256),
+    }
+    loss, loss_ir2red, loss_red2ir = fm_train_step(
+        batch, model, torch.device("cpu"), "bidirectional",
+    )
+    assert loss.ndim == 0
+    assert torch.isfinite(loss)
+    assert loss_ir2red > 0.0
+    assert loss_red2ir > 0.0
+
+
+def test_sample_fm_bidirectional_unguided() -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    x_src = torch.randn(1, 1, 256, 256)
+    cfg = FMInferenceConfig(num_steps=2)
+    out = sample_fm(
+        model, x_src, cfg, torch.device("cpu"),
+        direction=0, verbose=False,
+    )
+    assert out.shape == x_src.shape
+    assert torch.isfinite(out).all()
+
+
+def test_sample_fm_bidirectional_guided() -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    x_src = torch.randn(1, 1, 256, 256)
+    cfg = FMInferenceConfig(
+        num_steps=2,
+        lambda_sgi_scl=1e-4,
+        lambda_sgi_ccl=1e-5,
+        hist_bins=16,
+    )
+    prior_stats = {
+        "mu": torch.tensor(0.0),
+        "sigma": torch.tensor(1.0),
+        "histogram": torch.full((16,), 1.0 / 16.0),
+        "bins": torch.tensor(16),
+        "hist_min": torch.tensor(-5.0),
+        "hist_max": torch.tensor(5.0),
+    }
+    out = sample_fm(
+        model, x_src, cfg, torch.device("cpu"),
+        direction=1, prior_stats=prior_stats, verbose=False,
+    )
+    assert out.shape == x_src.shape
+    assert torch.isfinite(out).all()
