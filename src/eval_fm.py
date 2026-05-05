@@ -436,6 +436,8 @@ def main() -> None:
     parser.add_argument("--lambda_sgi_scl", type=float, default=0.0)
     parser.add_argument("--lambda_sgi_ccl", type=float, default=0.0)
     parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
+    parser.add_argument("--sgi_mode", choices=["velocity", "reproject"], default="velocity",
+                        help="SGI update mode: velocity correction or PnP-style re-interpolation")
     parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster)")
     parser.add_argument("--show_progress", action="store_true",
@@ -462,12 +464,14 @@ def main() -> None:
             lambda_sgi_scl=args.lambda_sgi_scl,
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
+            sgi_mode=args.sgi_mode,
         )
     else:
         cfg_inf = FMInferenceConfig(
             lambda_sgi_scl=args.lambda_sgi_scl,
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
+            sgi_mode=args.sgi_mode,
         )
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -481,7 +485,8 @@ def main() -> None:
     print(f"Mode         : {args.train_mode}")
     print(f"ODE steps    : {cfg_inf.num_steps}")
     print(f"SGI          : lambda_scl={cfg_inf.lambda_sgi_scl}  "
-          f"lambda_ccl={cfg_inf.lambda_sgi_ccl}  power={cfg_inf.sgi_schedule_power}")
+          f"lambda_ccl={cfg_inf.lambda_sgi_ccl}  power={cfg_inf.sgi_schedule_power}  "
+          f"mode={cfg_inf.sgi_mode}")
     print(f"Max samples  : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
     print(f"Progress     : {'shown' if args.show_progress else 'hidden'}")

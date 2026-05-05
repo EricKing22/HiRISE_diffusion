@@ -288,3 +288,29 @@ def test_sample_fm_bidirectional_guided() -> None:
     )
     assert out.shape == x_src.shape
     assert torch.isfinite(out).all()
+
+
+def test_sample_fm_bidirectional_guided_reproject() -> None:
+    model = BidirectionalFMUNet(base_channels=C)
+    x_src = torch.randn(1, 1, 256, 256)
+    cfg = FMInferenceConfig(
+        num_steps=2,
+        lambda_sgi_scl=1e-4,
+        lambda_sgi_ccl=1e-5,
+        hist_bins=16,
+        sgi_mode="reproject",
+    )
+    prior_stats = {
+        "mu": torch.tensor(0.0),
+        "sigma": torch.tensor(1.0),
+        "histogram": torch.full((16,), 1.0 / 16.0),
+        "bins": torch.tensor(16),
+        "hist_min": torch.tensor(-5.0),
+        "hist_max": torch.tensor(5.0),
+    }
+    out = sample_fm(
+        model, x_src, cfg, torch.device("cpu"),
+        direction=1, prior_stats=prior_stats, verbose=False,
+    )
+    assert out.shape == x_src.shape
+    assert torch.isfinite(out).all()

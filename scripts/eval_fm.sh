@@ -34,18 +34,19 @@ echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 
 # Evaluation mode: bidirectional | ir2red | red2ir
-# Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]
+# Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc] [velocity|reproject]
 TRAIN_MODE=${1:-ir2red}
 NUM_STEPS=${2:-50}
 LAMBDA_SGI_SCL=${3:-0.0}
 LAMBDA_SGI_CCL=${4:-0.0}
 DC_MODE=${5:-dc}
+SGI_MODE=${6:-velocity}
 
 case "$TRAIN_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]"
+        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc] [velocity|reproject]"
         exit 1
         ;;
 esac
@@ -55,7 +56,16 @@ case "$DC_MODE" in
     no_dc) DC_ARGS=(--no_dc) ;;
     *)
         echo "Invalid DC_MODE: $DC_MODE"
-        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc]"
+        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc] [velocity|reproject]"
+        exit 1
+        ;;
+esac
+
+case "$SGI_MODE" in
+    velocity|reproject) ;;
+    *)
+        echo "Invalid SGI_MODE: $SGI_MODE"
+        echo "Usage: sbatch eval_fm.sh [bidirectional|ir2red|red2ir] [num_steps] [lambda_sgi_scl] [lambda_sgi_ccl] [dc|no_dc] [velocity|reproject]"
         exit 1
         ;;
 esac
@@ -71,6 +81,7 @@ python src/eval_fm.py \
     --num_steps   $NUM_STEPS   \
     --lambda_sgi_scl $LAMBDA_SGI_SCL \
     --lambda_sgi_ccl $LAMBDA_SGI_CCL \
+    --sgi_mode   $SGI_MODE     \
     "${DC_ARGS[@]}"        \
     --batch_size  16           \
     --no_fid

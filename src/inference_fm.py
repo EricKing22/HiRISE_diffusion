@@ -35,6 +35,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 # Full Euler ODE sampling loop
 # =============================================================================
 
+def _sgi_loss(
+    x1_hat: torch.Tensor,
+    prior_stats: dict,
+    cfg_inf: FMInferenceConfig,
+) -> torch.Tensor:
+    loss_sgi = x1_hat.new_tensor(0.0)
+    if cfg_inf.lambda_sgi_scl > 0.0:
+        loss_sgi = loss_sgi + cfg_inf.lambda_sgi_scl * sci_l_scl(
+            x1_hat, prior_stats["mu"], prior_stats["sigma"],
+        )
+    if cfg_inf.lambda_sgi_ccl > 0.0:
+        loss_sgi = loss_sgi + cfg_inf.lambda_sgi_ccl * sci_l_ccl(
+            x1_hat,
+            prior_stats["histogram"],
+            int(prior_stats["bins"].item()),
+            hist_min=float(prior_stats["hist_min"].item()),
+            hist_max=float(prior_stats["hist_max"].item()),
+        )
+    return loss_sgi
+
+
 def sample_fm(
     model:    torch.nn.Module,
     x_source: torch.Tensor,       # [B, 1, H, W]
@@ -76,7 +97,8 @@ def sample_fm(
 
     if verbose:
         guide_msg = (
-            f", SGI λ_scl={cfg_inf.lambda_sgi_scl:g} λ_ccl={cfg_inf.lambda_sgi_ccl:g}"
+            f", SGI mode={cfg_inf.sgi_mode} "
+            f"λ_scl={cfg_inf.lambda_sgi_scl:g} λ_ccl={cfg_inf.lambda_sgi_ccl:g}"
             if use_guidance else ""
         )
         print(f"[FM] Euler ODE: {cfg_inf.num_steps} steps, dt={dt:.4f}{guide_msg}")
@@ -87,27 +109,27 @@ def sample_fm(
 
         if use_guidance:
             with torch.enable_grad():
-                x_t_req = x_t.detach().requires_grad_(True)
-                v_pred = model_forward(x_t_req, t_batch)
-                x1_hat = x_t_req + (1.0 - t_val) * v_pred
-
-                loss_sgi = x1_hat.new_tensor(0.0)
-                if cfg_inf.lambda_sgi_scl > 0.0:
-                    loss_sgi = loss_sgi + cfg_inf.lambda_sgi_scl * sci_l_scl(
-                        x1_hat, prior_stats["mu"], prior_stats["sigma"],
-                    )
-                if cfg_inf.lambda_sgi_ccl > 0.0:
-                    loss_sgi = loss_sgi + cfg_inf.lambda_sgi_ccl * sci_l_ccl(
-                        x1_hat,
-                        prior_stats["histogram"],
-                        int(prior_stats["bins"].item()),
-                        hist_min=float(prior_stats["hist_min"].item()),
-                        hist_max=float(prior_stats["hist_max"].item()),
-                    )
-
-                grad = torch.autograd.grad(loss_sgi, x_t_req, retain_graph=False)[0]
                 lambda_t = float(t_val ** cfg_inf.sgi_schedule_power)
-                v_pred = (v_pred - lambda_t * grad).detach()
+                if cfg_inf.sgi_mode == "velocity":
+                    x_t_req = x_t.detach().requires_grad_(True)
+                    v_pred = model_forward(x_t_req, t_batch)
+                    x1_hat = x_t_req + (1.0 - t_val) * v_pred
+                    loss_sgi = _sgi_loss(x1_hat, prior_stats, cfg_inf)
+                    grad = torch.autograd.grad(loss_sgi, x_t_req, retain_graph=False)[0]
+                    v_pred = (v_pred - lambda_t * grad).detach()
+                elif cfg_inf.sgi_mode == "reproject":
+                    x_t_req = x_t.detach().requires_grad_(True)
+                    v_pred = model_forward(x_t_req, t_batch)
+                    x1_hat = x_t_req + (1.0 - t_val) * v_pred
+                    noise_hat = x_t_req - t_val * v_pred
+                    loss_sgi = _sgi_loss(x1_hat, prior_stats, cfg_inf)
+                    grad_x1 = torch.autograd.grad(loss_sgi, x1_hat, retain_graph=False)[0]
+                    x1_guided = x1_hat - lambda_t * grad_x1
+                    x_t = ((1.0 - t_val) * noise_hat + t_val * x1_guided).detach()
+                    with torch.no_grad():
+                        v_pred = model_forward(x_t, t_batch)
+                else:
+                    raise ValueError(f"Unsupported FM SGI mode: {cfg_inf.sgi_mode}")
         else:
             with torch.no_grad():
                 v_pred = model_forward(x_t, t_batch)
@@ -144,6 +166,8 @@ def main() -> None:
     parser.add_argument("--lambda_sgi_scl", type=float, default=0.0)
     parser.add_argument("--lambda_sgi_ccl", type=float, default=0.0)
     parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
+    parser.add_argument("--sgi_mode", choices=["velocity", "reproject"], default="velocity",
+                        help="SGI update mode: velocity correction or PnP-style re-interpolation")
     parser.add_argument("--no_dc", action="store_true",
                         help="Disable source dc subtraction; also selects non-DC priors")
     parser.add_argument("--device",      default="cuda")
@@ -161,12 +185,14 @@ def main() -> None:
             lambda_sgi_scl=args.lambda_sgi_scl,
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
+            sgi_mode=args.sgi_mode,
         )
     else:
         cfg_inf = FMInferenceConfig(
             lambda_sgi_scl=args.lambda_sgi_scl,
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
+            sgi_mode=args.sgi_mode,
         )
 
     # ── Model ─────────────────────────────────────────────────────────────

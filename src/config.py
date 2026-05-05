@@ -109,6 +109,7 @@ class FMInferenceConfig(BaseModel):
     lambda_sgi_scl:      float = 0.0
     lambda_sgi_ccl:      float = 0.0
     sgi_schedule_power:  float = 2.0
+    sgi_mode:            Literal["velocity", "reproject"] = "velocity"
     hist_bins:           int   = 256
 
 
