@@ -27,8 +27,8 @@ class DataConfig(BaseModel):
     # (i.e. the prefix prepended to every row['Path'] value).
     # Default: <project_root>/data   — matches the original layout.
     # Change this if you move the files/ folder elsewhere.
-    data_root:   str  = "/scratch_root/ed425/HiRISE/"           # empty = resolved at runtime to <project_root>/data
-    csv_path:    str  = "/scratch_root/ed425/HiRISE/files/data_record_bin12.csv"           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
+    data_root:   str  = "/scratch_root/as5023/HiRISE/data/"           # empty = resolved at runtime to <project_root>/data
+    csv_path:    str  = "/scratch_root/as5023/HiRISE/data/data_record_bin12.csv"           # empty = resolved at runtime to <project_root>/data/files/data_record_bin12.csv
 
 
 class DDPMTrainConfig(BaseModel):
@@ -47,8 +47,8 @@ class DDPMTrainConfig(BaseModel):
     lambda_red_to_ir:  float = 1.0   # Direction B: RED4 → IR10
 
     # ── Checkpoint & logging ──────────────────────────────────────────────────
-    save_every:  int  = 5_000   # save checkpoint every N steps
-    log_every:   int  = 500
+    save_every:  int  = 10_000   # save checkpoint every N steps
+    log_every:   int  = 1000
     val_every:   int  = 1000    # run validation every N steps
     resume:      bool = False   # True = auto-resume from latest.pt if it exists
 
@@ -95,8 +95,8 @@ class FMTrainConfig(BaseModel):
     total_steps:    int   = 100_000
 
     # ── Checkpoint & logging ──────────────────────────────────────────────
-    save_every:     int   = 5_000
-    log_every:      int   = 500
+    save_every:     int   = 10_000
+    log_every:      int   = 1000
     val_every:      int   = 1000
     resume:         bool  = False
 
@@ -110,7 +110,15 @@ class FMInferenceConfig(BaseModel):
     lambda_sgi_ccl:      float = 0.0
     sgi_schedule_power:  float = 2.0
     sgi_mode:            Literal["velocity", "reproject"] = "velocity"
+    # SGI scaling controls how the statistical-gradient force is turned into an
+    # FM update. "raw" is the original lambda_t * grad rule. "ratio" normalizes
+    # the gradient direction and sets its RMS size to a fixed fraction of the
+    # model velocity, making the guidance strength interpretable across losses.
+    sgi_scale_mode:      Literal["ratio", "raw"] = "ratio"
+    sgi_guidance_ratio:  float = 0.01
     hist_bins:           int   = 256
+    sgi_diagnostics:     bool  = False
+    sgi_diagnostic_every: int  = 5
 
 
 # Backward-compatible aliases. Prefer the explicit DDPM* names in new code.

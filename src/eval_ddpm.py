@@ -300,7 +300,7 @@ def _fid_from_features(real_feats: np.ndarray, fake_feats: np.ndarray,
 
 def _eval_one_direction(
     model, scheduler, src, tgt, direction, prior,
-    center, scale, dc,
+    center, scale, dc, norm_gain,
     cfg_inf, device, edge_mode, dexined_model,
     compute_fid, inception, label,
 ):
@@ -320,9 +320,10 @@ def _eval_one_direction(
                       dexined_model=dexined_model)
 
     pred_raw  = pred
-    pred_norm = pred_raw.clamp(-10.0, 10.0)
-    pred_phys = (pred_norm + dc) * scale + center
-    tgt_phys  = (tgt       + dc) * scale + center
+    norm_limit = 10.0 * norm_gain
+    pred_norm = torch.maximum(torch.minimum(pred_raw, norm_limit), -norm_limit)
+    pred_phys = (pred_norm / norm_gain + dc) * scale + center
+    tgt_phys  = (tgt       / norm_gain + dc) * scale + center
 
     mse_phys_b = F.mse_loss(pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
     mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1,2,3])
@@ -332,9 +333,10 @@ def _eval_one_direction(
     rel_mae_b = mae_phys_b / target_range_b
     rel_rmse_b = torch.sqrt(mse_phys_b.clamp_min(0.0)) / target_range_b
     scale_b = scale.flatten()
-    src_clip_b = (src.abs() >= 9.999).float().mean(dim=[1, 2, 3])
-    tgt_clip_b = (tgt.abs() >= 9.999).float().mean(dim=[1, 2, 3])
-    pred_clip_b = (pred_raw.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    clip_limit = norm_limit - 1e-3
+    src_clip_b = (src.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
+    tgt_clip_b = (tgt.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
+    pred_clip_b = (pred_raw.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
 
     ssim_phy_vals, ssim_norm_vals = [], []
     for i in range(B):
@@ -345,7 +347,7 @@ def _eval_one_direction(
         ssim_norm_vals.append(_ssim_safe(
             tgt[i].squeeze().cpu().numpy(),
             pred_norm[i].squeeze().cpu().numpy(),
-            data_range=20.0))
+            data_range=float(20.0 * norm_gain[i].flatten()[0].item())))
 
     with torch.no_grad():
         pearson_b = _pearson_batch(pred_norm, tgt)
@@ -433,8 +435,14 @@ def evaluate_images(
         center = norm_stats[:, :1, None, None].to(device)
         scale  = norm_stats[:, 1:2, None, None].to(device)
         dc     = norm_stats[:, 2:3, None, None].to(device)
+        norm_gain = (
+            norm_stats[:, 3:4, None, None].to(device)
+            if norm_stats.shape[1] > 3
+            else torch.ones_like(dc)
+        )
 
         shared = dict(center=center, scale=scale, dc=dc,
+                      norm_gain=norm_gain,
                       cfg_inf=cfg_inf, device=device, edge_mode=edge_mode,
                       dexined_model=dexined_model,
                       compute_fid=compute_fid, inception=inception)
@@ -488,6 +496,7 @@ def evaluate_images(
         return float(np.percentile(lst, q)) if lst else float("nan")
 
     a0, a1 = accs[0], accs[1]
+    norm_max_val = 20.0 * float(getattr(val_dataset, "norm_gain", 1.0))
     results = dict(
         n_samples        = n_done,
         # Physical space
@@ -500,11 +509,11 @@ def evaluate_images(
         # Normalized space
         mse_norm_ir2red  = _avg(a0["mse_norm"]),
         mae_norm_ir2red  = _avg(a0["mae_norm"]),
-        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], 20.0),
+        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], norm_max_val),
         ssim_norm_ir2red = _avg(a0["ssim_norm"]),
         mse_norm_red2ir  = _avg(a1["mse_norm"]),
         mae_norm_red2ir  = _avg(a1["mae_norm"]),
-        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], 20.0),
+        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], norm_max_val),
         ssim_norm_red2ir = _avg(a1["ssim_norm"]),
         # Statistical
         pearson_ir2red   = _avg(a0["pearson"]),
@@ -600,14 +609,19 @@ def main() -> None:
                         help="Edge detector: sobel (default) or dexined")
     parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
                         help="Path to DexiNed pretrained weights (.pth)")
-    parser.add_argument("--no_dc", action="store_true",
-                        help="Disable Method B dc subtraction (must match training setting)")
+    parser.add_argument("--use_dc", dest="use_dc", action="store_true",
+                        help="Enable Method B dc subtraction for DDPM evaluation")
+    parser.add_argument("--no_dc", dest="use_dc", action="store_false",
+                        help="Disable Method B dc subtraction for DDPM evaluation")
+    parser.set_defaults(use_dc=False)
+    parser.add_argument("--norm_gain", type=float, default=1.0,
+                        help="Fixed gain applied after scene scaling")
     args = parser.parse_args()
 
     cfg_model = DDPMModelConfig()
     cfg_data  = DataConfig()
     cfg_inf   = DDPMInferenceConfig(lambda_scl=args.lambda_scl, lambda_ccl=args.lambda_ccl)
-    use_dc    = not args.no_dc
+    use_dc    = args.use_dc
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -622,6 +636,7 @@ def main() -> None:
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
     print(f"Progress     : {'shown' if args.show_progress else 'hidden'}")
     print(f"DC norm      : {'enabled' if use_dc else 'disabled'}")
+    print(f"Norm gain    : {args.norm_gain}")
     print()
 
     if args.train_mode == "bidirectional":
@@ -665,6 +680,8 @@ def main() -> None:
     ).to(device)
 
     prior_suffix = "_dc" if use_dc else ""
+    if args.norm_gain != 1.0:
+        prior_suffix = f"{prior_suffix}_g{args.norm_gain:g}"
     prior_red_name = f"prior_red{prior_suffix}.pt"
     prior_ir_name  = f"prior_ir{prior_suffix}.pt"
     prior_red = load_prior_stats(os.path.join(args.prior_dir, prior_red_name), device)
@@ -677,7 +694,7 @@ def main() -> None:
 
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets, dc=use_dc,
+        allowed_sets=val_sets, dc=use_dc, norm_gain=args.norm_gain,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
 
@@ -745,7 +762,8 @@ def main() -> None:
     print(f"{'  pred clamp':<{W}}  {_pct(results['pred_clip_ir2red'])}  {_pct(results['pred_clip_red2ir'])}  {'—':>10}")
     print(f"{'='*68}")
     print(f"(n={results['n_samples']}  mode={args.train_mode}  λ_scl={args.lambda_scl}  λ_ccl={args.lambda_ccl})")
-    print(f"  PSNR (normalized, MAX=20) ≡ PSNR (physical, MAX=1.0) under scale=0.05 normalisation")
+    print(f"  PSNR (normalized, MAX={20.0 * args.norm_gain:g}) uses clamp range "
+          f"[-{10.0 * args.norm_gain:g},{10.0 * args.norm_gain:g}]")
     print(f"  SSIM physical: per-image GT dynamic range, floor=0.01")
     print(f"  Diagnostics: range is physical target max-min; relative errors divide by that range.")
 

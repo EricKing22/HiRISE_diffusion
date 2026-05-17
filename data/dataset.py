@@ -7,6 +7,26 @@ import pandas as pd
 import os
 
 
+def _resolve_data_path(data_root, rel_path):
+    if os.name == "nt":
+        rel_path = rel_path.replace("/", "\\")
+
+    path = os.path.normpath(os.path.join(data_root, rel_path))
+    if os.path.isfile(path):
+        return path
+
+    # Some exported CSVs store paths as ../../files/npy_files_b12/... while
+    # the shared cluster copy stores npy_files_b12 directly under data_root.
+    for marker in ("npy_files_b12", "npy_files_b22", "npy_files_evals"):
+        if marker in rel_path:
+            suffix = rel_path[rel_path.index(marker):]
+            candidate = os.path.normpath(os.path.join(data_root, suffix))
+            if os.path.isfile(candidate):
+                return candidate
+
+    return path
+
+
 class HiRISEDataset(Dataset):
     """
     A custom Dataset for loading images.
@@ -81,9 +101,7 @@ class HiRISEDataset(Dataset):
         invalid_obs = []
 
         for idx, row in self.data_record.iterrows():
-            path = os.path.join(self.data_root, row['Path'])
-            if os.name == "nt":  # Windows: normalise slashes
-                path = path.replace("/", "\\")
+            path = _resolve_data_path(self.data_root, row['Path'])
             if not os.path.isfile(path):
                 observation = row['Observation']
                 invalid_obs.append(observation)
@@ -105,7 +123,7 @@ class HiRISEDataset(Dataset):
 
         # ------ LOAD IMAGES ------
         def load(rel_path: str):
-            return np.load(os.path.join(self.data_root, rel_path))
+            return np.load(_resolve_data_path(self.data_root, rel_path))
 
         try:
             band_imgs = [load(df.at[ccd, 'Path']) for ccd in self.band_ccds]
@@ -244,25 +262,58 @@ class DiffusionDataset(torch.utils.data.Dataset):
     -------------
     ir         : (1, H, W)  IR10, normalised (mean≈0 after dc subtraction)
     red        : (1, H, W)  RED4, normalised with IR10 stats then dc-shifted
-    norm_stats : (3,)       [center, scale, dc]  — for denormalisation:
-                            x_raw = (x_norm + dc) * scale + center
+    norm_stats : (4,)       [center, scale, dc, norm_gain]  — for denormalisation:
+                            x_raw = (x_norm / norm_gain + dc) * scale + center
     obs_id     : str
     set_name   : int
     date       : str
     """
 
-    def __init__(self, data_record, data_root=None, sweep=True, allowed_sets=None, dc=True):
+    def __init__(self, data_record, data_root=None, sweep=True, allowed_sets=None,
+                 dc=True, norm_gain=4.0, filter_missing=False):
         self.dc = dc
+        self.norm_gain = float(norm_gain)
+        if self.norm_gain <= 0:
+            raise ValueError(f"norm_gain must be positive, got {norm_gain}")
+        self.data_root = data_root or os.path.join(os.getcwd(), "data")
         if allowed_sets is not None:
             data_record = data_record[data_record['Set'].isin(allowed_sets)]
+        data_record = (
+            self._filter_existing_pairs(data_record)
+            if filter_missing
+            else self._filter_required_pairs(data_record)
+        )
         if data_record.empty:
             raise ValueError("No data found for the specified allowed_sets")
         self.data_record = data_record.reset_index(drop=True)
-        self.data_root   = data_root or os.path.join(os.getcwd(), "data")
         self.unique_sets = sorted(data_record['Set'].unique())
         if not sweep:
             print(f"DiffusionDataset: {len(self.unique_sets)} sets  "
                   f"({data_record['Observation'].nunique()} observations)")
+
+    @staticmethod
+    def _filter_required_pairs(data_record):
+        if data_record.empty:
+            return data_record
+
+        required = {"IR10", "RED4"}
+        complete_sets = (
+            data_record.groupby("Set")["CCD"]
+            .apply(lambda ccd: required.issubset(set(ccd)))
+        )
+        complete_sets = complete_sets[complete_sets].index
+        return data_record[data_record["Set"].isin(complete_sets)]
+
+    def _filter_existing_pairs(self, data_record):
+        if data_record.empty:
+            return data_record
+
+        present = data_record[
+            data_record["Path"].apply(
+                lambda rel_path: os.path.isfile(_resolve_data_path(self.data_root, rel_path))
+            )
+        ]
+        return self._filter_required_pairs(present)
 
     def __len__(self):
         return len(self.unique_sets)
@@ -272,10 +323,8 @@ class DiffusionDataset(torch.utils.data.Dataset):
         df = self.data_record[self.data_record['Set'] == set_idx].set_index('CCD')
 
         def load(rel_path):
-            if os.name == "nt":  # Windows: normalise slashes
-                rel_path = rel_path.replace("/", "\\")
             return torch.from_numpy(
-                np.load(os.path.join(self.data_root, rel_path)).astype(np.float32)
+                np.load(_resolve_data_path(self.data_root, rel_path)).astype(np.float32)
             )
 
         ir  = load(df.at['IR10', 'Path']).unsqueeze(0)   # (1, H, W)
@@ -305,7 +354,11 @@ class DiffusionDataset(torch.utils.data.Dataset):
         ir_norm  = ir_norm  - dc_val
         red_norm = red_norm - dc_val
 
-        norm_stats = torch.stack([center, scale, dc_val])   # (3,)
+        gain = torch.tensor(self.norm_gain, dtype=ir_norm.dtype)
+        ir_norm  = ir_norm  * gain
+        red_norm = red_norm * gain
+
+        norm_stats = torch.stack([center, scale, dc_val, gain])   # (4,)
 
         return dict(
             ir=ir_norm,
@@ -321,7 +374,7 @@ def diffusion_collate_fn(batch):
     return dict(
         ir        =torch.stack([b['ir']         for b in batch]),   # (B, 1, H, W)
         red       =torch.stack([b['red']        for b in batch]),   # (B, 1, H, W)
-        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 3) [center, scale, dc]
+        norm_stats=torch.stack([b['norm_stats'] for b in batch]),   # (B, 4) [center, scale, dc, norm_gain]
         obs_id    =[b['obs_id']   for b in batch],
         set_name  =[b['set_name'] for b in batch],
         date      =[b['date']     for b in batch],
@@ -388,49 +441,3 @@ def _robust_center_scale_from_inputs(bands, neighbours=None, include_red_means=F
     mad = (flat - a).abs().median()
     s = (1.4826 * mad).clamp_min(1e-3)
     return a, s
-
-
-# Test usage
-if __name__ == '__main__':
-    start_time = time.time()
-    transform = None
-
-    project_root = os.getcwd()
-
-    dr = pd.read_csv(project_root + '/data/files/data_record_bin12.csv')
-
-    allowed_sets = [19645, 7292, 7293, 14774]  # observations present in data/files/npy_files_b12
-
-    dataset = FilteredHiRISEDataset(transform=transform, data_record=dr, meta_cols=['Binning', 'TDI'], sweep=False, allowed_sets=allowed_sets)
-    print(f"Dataset initialisation time: {time.time() - start_time:.2f} seconds")
-
-    sample = dataset[0]
-
-    print("Test usage:")
-    print(f"\tDataset length: {len(dataset)}")
-    print(f"\tNumber of neighbour images: {len(sample['x_neigh'])}")
-    for img in sample['x_neigh']:
-        print(f"\tImage shape: {img.shape}")
-    print(f"\tLabel image shape: {sample['y'].shape}")
-    print(f"Total time: {time.time() - start_time:.2f} seconds")
-
-    # Inspect y per set directly from the dataset (bypasses DataLoader/collate)
-    for idx in range(len(dataset)):
-        sample = dataset[idx]
-        y = sample["y"]                 # (1, Hb, Wb), already a torch.Tensor
-        set_name = sample["set_name"]   # whatever you stored in __getitem__
-
-        y_flat = y.view(-1)
-        y_mean = y_flat.mean().item()
-        y_std = y_flat.std().item()
-
-        print(f"Set {set_name}: mean={y_mean:.6f}, std={y_std:.6f}")
-
-    loader = get_loader(dataset, batch_size=32, collate_fn=collate_fn)
-    first_batch = next(iter(loader))
-
-    y_batch = first_batch["y"].detach().cpu()  # (B, 1, Hb, Wb)
-    B = y_batch.shape[0]
-    per_img_std = y_batch.view(B, -1).std(dim=1)
-    avg_std = per_img_std.mean().item()
-    print(f"Avg per-image std of first batch (y): {avg_std:.6f}")

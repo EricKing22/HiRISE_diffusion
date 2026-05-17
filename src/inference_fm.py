@@ -21,6 +21,7 @@ import argparse
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(__file__))
 from config import FMModelConfig, FMInferenceConfig
@@ -56,6 +57,99 @@ def _sgi_loss(
     return loss_sgi
 
 
+def _sgi_loss_parts(
+    x1_hat: torch.Tensor,
+    prior_stats: dict,
+    cfg_inf: FMInferenceConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    loss_scl = x1_hat.new_tensor(0.0)
+    loss_ccl = x1_hat.new_tensor(0.0)
+    if cfg_inf.lambda_sgi_scl > 0.0:
+        loss_scl = sci_l_scl(x1_hat, prior_stats["mu"], prior_stats["sigma"])
+    if cfg_inf.lambda_sgi_ccl > 0.0:
+        loss_ccl = sci_l_ccl(
+            x1_hat,
+            prior_stats["histogram"],
+            int(prior_stats["bins"].item()),
+            hist_min=float(prior_stats["hist_min"].item()),
+            hist_max=float(prior_stats["hist_max"].item()),
+        )
+    loss_total = cfg_inf.lambda_sgi_scl * loss_scl + cfg_inf.lambda_sgi_ccl * loss_ccl
+    return loss_total, loss_scl, loss_ccl
+
+
+def _tensor_rms(x: torch.Tensor) -> torch.Tensor:
+    return x.square().mean(dim=[1, 2, 3]).sqrt()
+
+
+def _sgi_guidance_correction(
+    grad: torch.Tensor,
+    v_pred: torch.Tensor,
+    lambda_t: float,
+    cfg_inf: FMInferenceConfig,
+) -> torch.Tensor:
+    """
+    Convert the SGI loss gradient into the actual correction applied at this
+    Euler step. Ratio scaling is the experimental default because the raw
+    global-statistic gradient was orders of magnitude smaller than the FM
+    velocity, even with large SGI loss weights.
+    """
+    if cfg_inf.sgi_scale_mode == "raw":
+        return float(lambda_t) * grad
+
+    if cfg_inf.sgi_scale_mode == "ratio":
+        grad_norm = _tensor_rms(grad).view(-1, 1, 1, 1).clamp_min(1e-12)
+        v_norm = _tensor_rms(v_pred.detach()).view(-1, 1, 1, 1).clamp_min(1e-12)
+        target_norm = float(lambda_t) * float(cfg_inf.sgi_guidance_ratio) * v_norm
+        return target_norm * grad / grad_norm
+
+    raise ValueError(f"Unsupported FM SGI scale mode: {cfg_inf.sgi_scale_mode}")
+
+
+def _append_sgi_diagnostics(
+    diagnostics: list[dict],
+    *,
+    step_idx: int,
+    t_val: float,
+    lambda_t: float,
+    v_pred: torch.Tensor,
+    grad: torch.Tensor,
+    guidance_correction: torch.Tensor,
+    loss_scl: torch.Tensor,
+    loss_ccl: torch.Tensor,
+    x1_hat: torch.Tensor,
+    prior_stats: dict,
+) -> None:
+    with torch.no_grad():
+        v_norm = _tensor_rms(v_pred.detach())
+        grad_norm = _tensor_rms(grad.detach())
+        guided_norm = _tensor_rms(guidance_correction.detach())
+        ratio = guided_norm / v_norm.clamp_min(1e-12)
+        cosine = F.cosine_similarity(
+            v_pred.detach().flatten(1),
+            (-grad.detach()).flatten(1),
+            dim=1,
+            eps=1e-12,
+        )
+        x1_flat = x1_hat.detach().flatten(1)
+        diagnostics.append(dict(
+            step=step_idx,
+            t=t_val,
+            lambda_t=float(lambda_t),
+            v_norm=float(v_norm.mean().item()),
+            grad_norm=float(grad_norm.mean().item()),
+            guided_norm=float(guided_norm.mean().item()),
+            guided_to_v=float(ratio.mean().item()),
+            cosine=float(cosine.mean().item()),
+            loss_scl=float(loss_scl.detach().item()),
+            loss_ccl=float(loss_ccl.detach().item()),
+            x1_mean=float(x1_flat.mean(dim=1).mean().item()),
+            x1_sigma=float(x1_flat.std(dim=1, unbiased=False).mean().item()),
+            prior_mean=float(prior_stats["mu"].detach().item()),
+            prior_sigma=float(prior_stats["sigma"].detach().item()),
+        ))
+
+
 def sample_fm(
     model:    torch.nn.Module,
     x_source: torch.Tensor,       # [B, 1, H, W]
@@ -64,6 +158,7 @@ def sample_fm(
     direction=None,               # int or [B] tensor for bidirectional models
     prior_stats: dict | None = None,
     verbose:  bool = True,
+    return_diagnostics: bool = False,
 ) -> torch.Tensor:
     """
     FM inference via Euler ODE integration.
@@ -82,6 +177,8 @@ def sample_fm(
         prior_stats is not None
         and (cfg_inf.lambda_sgi_scl > 0.0 or cfg_inf.lambda_sgi_ccl > 0.0)
     )
+    diagnostics: list[dict] = []
+    diagnostic_every = max(1, int(getattr(cfg_inf, "sgi_diagnostic_every", 5)))
 
     if direction is None:
         direction_t = None
@@ -98,7 +195,9 @@ def sample_fm(
     if verbose:
         guide_msg = (
             f", SGI mode={cfg_inf.sgi_mode} "
-            f"λ_scl={cfg_inf.lambda_sgi_scl:g} λ_ccl={cfg_inf.lambda_sgi_ccl:g}"
+            f"λ_scl={cfg_inf.lambda_sgi_scl:g} λ_ccl={cfg_inf.lambda_sgi_ccl:g} "
+            f"scale={cfg_inf.sgi_scale_mode}"
+            f"{f' ratio={cfg_inf.sgi_guidance_ratio:g}' if cfg_inf.sgi_scale_mode == 'ratio' else ''}"
             if use_guidance else ""
         )
         print(f"[FM] Euler ODE: {cfg_inf.num_steps} steps, dt={dt:.4f}{guide_msg}")
@@ -114,17 +213,47 @@ def sample_fm(
                     x_t_req = x_t.detach().requires_grad_(True)
                     v_pred = model_forward(x_t_req, t_batch)
                     x1_hat = x_t_req + (1.0 - t_val) * v_pred
-                    loss_sgi = _sgi_loss(x1_hat, prior_stats, cfg_inf)
+                    loss_sgi, loss_scl, loss_ccl = _sgi_loss_parts(x1_hat, prior_stats, cfg_inf)
                     grad = torch.autograd.grad(loss_sgi, x_t_req, retain_graph=False)[0]
-                    v_pred = (v_pred - lambda_t * grad).detach()
+                    guidance_correction = _sgi_guidance_correction(grad, v_pred, lambda_t, cfg_inf)
+                    if return_diagnostics and step_idx % diagnostic_every == 0:
+                        _append_sgi_diagnostics(
+                            diagnostics,
+                            step_idx=step_idx,
+                            t_val=t_val,
+                            lambda_t=lambda_t,
+                            v_pred=v_pred,
+                            grad=grad,
+                            guidance_correction=guidance_correction,
+                            loss_scl=loss_scl,
+                            loss_ccl=loss_ccl,
+                            x1_hat=x1_hat,
+                            prior_stats=prior_stats,
+                        )
+                    v_pred = (v_pred - guidance_correction).detach()
                 elif cfg_inf.sgi_mode == "reproject":
                     x_t_req = x_t.detach().requires_grad_(True)
                     v_pred = model_forward(x_t_req, t_batch)
                     x1_hat = x_t_req + (1.0 - t_val) * v_pred
                     noise_hat = x_t_req - t_val * v_pred
-                    loss_sgi = _sgi_loss(x1_hat, prior_stats, cfg_inf)
+                    loss_sgi, loss_scl, loss_ccl = _sgi_loss_parts(x1_hat, prior_stats, cfg_inf)
                     grad_x1 = torch.autograd.grad(loss_sgi, x1_hat, retain_graph=False)[0]
-                    x1_guided = x1_hat - lambda_t * grad_x1
+                    guidance_correction = _sgi_guidance_correction(grad_x1, v_pred, lambda_t, cfg_inf)
+                    if return_diagnostics and step_idx % diagnostic_every == 0:
+                        _append_sgi_diagnostics(
+                            diagnostics,
+                            step_idx=step_idx,
+                            t_val=t_val,
+                            lambda_t=lambda_t,
+                            v_pred=v_pred,
+                            grad=grad_x1,
+                            guidance_correction=guidance_correction,
+                            loss_scl=loss_scl,
+                            loss_ccl=loss_ccl,
+                            x1_hat=x1_hat,
+                            prior_stats=prior_stats,
+                        )
+                    x1_guided = x1_hat - guidance_correction
                     x_t = ((1.0 - t_val) * noise_hat + t_val * x1_guided).detach()
                     with torch.no_grad():
                         v_pred = model_forward(x_t, t_batch)
@@ -140,6 +269,8 @@ def sample_fm(
             print(f"  step {step_idx:>4}/{cfg_inf.num_steps}  t={t_val:.3f}  "
                   f"x range=[{x_t.min().item():.3f}, {x_t.max().item():.3f}]")
 
+    if return_diagnostics:
+        return x_t, diagnostics
     return x_t
 
 
@@ -168,8 +299,14 @@ def main() -> None:
     parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
     parser.add_argument("--sgi_mode", choices=["velocity", "reproject"], default="velocity",
                         help="SGI update mode: velocity correction or PnP-style re-interpolation")
+    parser.add_argument("--sgi_scale_mode", choices=["ratio", "raw"], default="ratio",
+                        help="SGI scaling: ratio controls correction RMS relative to velocity; raw uses lambda_t * grad")
+    parser.add_argument("--sgi_guidance_ratio", type=float, default=0.01,
+                        help="Target RMS correction / RMS velocity when --sgi_scale_mode=ratio")
     parser.add_argument("--no_dc", action="store_true",
                         help="Disable source dc subtraction; also selects non-DC priors")
+    parser.add_argument("--norm_gain", type=float, default=4.0,
+                        help="Fixed gain applied after DC-normalized scene scaling")
     parser.add_argument("--device",      default="cuda")
     args = parser.parse_args()
 
@@ -186,6 +323,8 @@ def main() -> None:
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
             sgi_mode=args.sgi_mode,
+            sgi_scale_mode=args.sgi_scale_mode,
+            sgi_guidance_ratio=args.sgi_guidance_ratio,
         )
     else:
         cfg_inf = FMInferenceConfig(
@@ -193,6 +332,8 @@ def main() -> None:
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
             sgi_mode=args.sgi_mode,
+            sgi_scale_mode=args.sgi_scale_mode,
+            sgi_guidance_ratio=args.sgi_guidance_ratio,
         )
 
     # ── Model ─────────────────────────────────────────────────────────────
@@ -226,6 +367,8 @@ def main() -> None:
         else:
             target_direction = args.direction
         prior_suffix = "_dc" if use_dc else ""
+        if args.norm_gain != 1.0:
+            prior_suffix = f"{prior_suffix}_g{args.norm_gain:g}"
         prior_modality = "red" if target_direction == 0 else "ir"
         prior_name = f"prior_{prior_modality}{prior_suffix}.pt"
         prior_stats = load_prior_stats(os.path.join(args.prior_dir, prior_name), device)
@@ -270,8 +413,10 @@ def main() -> None:
         x_source = x_source - dc
     else:
         dc = torch.zeros((), dtype=x_source.dtype)
+    x_source = x_source * args.norm_gain
     print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  "
-          f"dc={dc.item():.4f}  dc_norm={'enabled' if use_dc else 'disabled'}")
+          f"dc={dc.item():.4f}  dc_norm={'enabled' if use_dc else 'disabled'}  "
+          f"norm_gain={args.norm_gain:g}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
@@ -288,7 +433,7 @@ def main() -> None:
     )
 
     # Restore dc offset.
-    result = result + dc.to(device)
+    result = result / args.norm_gain + dc.to(device)
 
     # ── Save ──────────────────────────────────────────────────────────────
     out_np = result.squeeze().cpu().numpy()

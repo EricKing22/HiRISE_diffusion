@@ -181,6 +181,40 @@ CM-Diff 不需要 per-scene 归一化，因为 SAR + 光学数据的动态范围
 - IR10 均值 = 0（by construction），典型 p5/p95 ≈ ±0.20
 - RED4 集中于 −0.22 附近，p5/p95 ≈ [−0.66, +0.04]
 
+### 为什么 FM 实验中加入 `norm_gain` 可能有帮助
+
+当前 FM 使用 rectified flow：
+
+```
+x_t = (1 - t) * noise + t * x_target
+v_target = x_target - noise
+```
+
+这里 `noise` 是标准高斯，典型尺度约为 1。但开启 dc 后，HiRISE 归一化图像的有效动态范围明显更窄：IR10 的 p5/p95 只有约 ±0.20，RED4 也主要集中在小幅偏移附近。这会让 clean endpoint `x_target` 的尺度远小于 noise endpoint。
+
+加入固定 gain：
+
+```
+x_model = norm_gain * (x_robust - dc)
+x_raw   = (x_model / norm_gain + dc) * scale + center
+```
+
+它不改变物理反归一化结果，只改变模型看到的数值尺度。对 FM 来说，`norm_gain=4` 有几个潜在优势：
+
+1. **让数据端点更接近高斯端点的尺度。**  
+   如果 `x_target` 的标准差只有 0.2 左右，而 `noise` 的标准差是 1，flow 的大部分速度会被“从 N(0,1) 收缩到很窄的数据流形”主导。乘以 gain 后，clean endpoint 的方差更接近 noise endpoint，ODE 轨迹更均衡。
+
+2. **让网络更容易学习可见结构。**  
+   当目标图像数值幅度很小，结构性差异会被压到很小的 residual 里。gain 把 IR/RED 的局部纹理、边缘和 band offset 放大到 U-Net 更容易使用的范围，同时最后仍可用 `norm_gain` 精确反归一化。
+
+3. **让 SGI 梯度有更合理的数值尺度。**  
+   SGI 的 mean、sigma、histogram loss 都在模型归一化空间里计算。如果数据分布太窄，统计损失和 `x_t` 上的梯度可能相对很弱，或者需要非常大的 lambda 才能产生可见影响。gain 后，prior 的 `sigma` 和 histogram support 同步放大，SGI 的梯度尺度更接近 FM velocity 的尺度。
+
+4. **避免把 lambda 调参和归一化尺度混在一起。**  
+   没有 gain 时，如果 SGI 不起作用，可能是方法无效，也可能只是数据尺度太小导致 lambda 不在合适量级。固定 gain 后，lambda 的含义更稳定，更容易比较 `lambda_sgi_scl/ccl`、velocity guidance 和 PnP-style re-interpolation。
+
+注意：`norm_gain` 必须在 training、prior computation、evaluation、inference 中保持一致。若训练使用 `dc=True, norm_gain=4`，则 SGI prior 也必须来自同一空间，例如 `prior_red_dc_g4.pt` 和 `prior_ir_dc_g4.pt`。旧 DDPM baseline 默认仍应使用 `dc=False, norm_gain=1`，对应 `prior_red.pt` 和 `prior_ir.pt`。
+
 ### DC 减除的代价与局限
 
 #### 1. 归一化参数的不对称性（部署层面）

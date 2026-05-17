@@ -20,9 +20,10 @@ echo -e "Job started on $(date)\n"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
-DATA_ROOT=/scratch_root/ed425/HiRISE_diffusion/
-CSV_PATH=/scratch_root/ed425/HiRISE_diffusion/files/data_record_bin12.csv
+DATA_ROOT=/scratch_root/as5023/HiRISE/data/
+CSV_PATH=/scratch_root/as5023/HiRISE/data/data_record_bin12.csv
 PRIOR_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
+NORM_GAIN=${1:-4.0}
 
 mkdir -p /scratch_root/ed425/HiRISE_diffusion/scripts/logs
 mkdir -p $PRIOR_DIR
@@ -33,6 +34,8 @@ echo "Project root : $PROJECT_ROOT"
 echo "Data root    : $DATA_ROOT"
 echo "CSV path     : $CSV_PATH"
 echo "Prior dir    : $PRIOR_DIR"
+echo "DC norm      : enabled"
+echo "Norm gain    : $NORM_GAIN"
 echo ""
 
 python src/compute_prior.py \
@@ -40,7 +43,8 @@ python src/compute_prior.py \
     --csv_path  $CSV_PATH   \
     --prior_dir $PRIOR_DIR  \
     --bins      256         \
-    --device    cpu
+    --device    cpu         \
+    --norm_gain $NORM_GAIN
 
 end_time=$(date +%s)
 

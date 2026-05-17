@@ -223,6 +223,13 @@ def main() -> None:
                         help="Edge detector: sobel (default) or dexined")
     parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
                         help="Path to DexiNed pretrained weights (.pth)")
+    parser.add_argument("--use_dc", dest="use_dc", action="store_true",
+                        help="Enable Method B dc subtraction for DDPM inference")
+    parser.add_argument("--no_dc", dest="use_dc", action="store_false",
+                        help="Disable Method B dc subtraction for DDPM inference")
+    parser.set_defaults(use_dc=False)
+    parser.add_argument("--norm_gain", type=float, default=1.0,
+                        help="Fixed gain applied after scene scaling")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -258,15 +265,24 @@ def main() -> None:
     ).to(device)
 
     # ── Prior statistics ───────────────────────────────────────────────────────
-    # direction=0 (IR→RED): target domain is RED4  → prior_red.pt
-    # direction=1 (RED→IR): target domain is IR10  → prior_ir.pt
-    prior_name = "prior_red.pt" if args.direction == 0 else "prior_ir.pt"
+    # direction=0 (IR→RED): target domain is RED4.
+    # direction=1 (RED→IR): target domain is IR10.
+    use_dc = args.use_dc
+    prior_suffix = "_dc" if use_dc else ""
+    if args.norm_gain != 1.0:
+        prior_suffix = f"{prior_suffix}_g{args.norm_gain:g}"
+    prior_name = (
+        f"prior_red{prior_suffix}.pt"
+        if args.direction == 0
+        else f"prior_ir{prior_suffix}.pt"
+    )
     prior_path = os.path.join(args.prior_dir, prior_name)
 
     if not os.path.exists(prior_path):
         print(f"[prior] {prior_path} not found — computing from dataset ...")
         prior_ir, prior_red = compute_prior_from_dataset(
-            args.prior_dir, device, data_root=args.data_root, csv_path=args.csv_path
+            args.prior_dir, device, data_root=args.data_root, csv_path=args.csv_path,
+            dc=use_dc, norm_gain=args.norm_gain,
         )
         prior_stats = prior_red if args.direction == 0 else prior_ir
     else:
@@ -312,11 +328,16 @@ def main() -> None:
     scale  = (1.4826 * mad).clamp_min(0.05)
     x_source = ((x_source - center) / scale).clamp(-10, 10)
 
-    # Method B: subtract IR10 normalized mean so scene enters BidirectionalDDPMUNet with IR mean≈0
-    # flat already holds the raw IR10 pixels (or source pixels as fallback)
-    dc = ((flat - center) / scale).clamp(-10, 10).mean()
-    x_source = x_source - dc
-    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  dc={dc.item():.4f}")
+    # Method B: subtract IR10 normalized mean so scene enters BidirectionalDDPMUNet with IR mean≈0.
+    # flat already holds the raw IR10 pixels (or source pixels as fallback).
+    if use_dc:
+        dc = ((flat - center) / scale).clamp(-10, 10).mean()
+        x_source = x_source - dc
+    else:
+        dc = torch.tensor(0.0, dtype=x_source.dtype)
+    x_source = x_source * args.norm_gain
+    print(f"[norm] center={center.item():.4f}  scale={scale.item():.4f}  dc={dc.item():.4f}  "
+          f"dc_norm={'enabled' if use_dc else 'disabled'}  norm_gain={args.norm_gain:g}")
 
     x_source = x_source.to(device)
     print(f"Source image:  shape={tuple(x_source.shape)}  "
@@ -333,7 +354,7 @@ def main() -> None:
                         dexined_model=dexined_model)
 
     # ── Restore dc offset ─────────────────────────────────────────────────────
-    result = result + dc.to(device)
+    result = result / args.norm_gain + dc.to(device)
 
     # ── Save ───────────────────────────────────────────────────────────────────
     out_np = result.squeeze().cpu().numpy()           # [H, W]

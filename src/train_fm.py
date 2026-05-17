@@ -130,6 +130,10 @@ def main() -> None:
     parser.add_argument("--wandb_project",  default="HiRISE_diffusion")
     parser.add_argument("--run_name",       default=None)
     parser.add_argument("--no_wandb",       action="store_true")
+    parser.add_argument("--norm_gain",      type=float, default=4.0,
+                        help="Fixed gain applied after DC-normalized scene scaling")
+    parser.add_argument("--save_every",     type=int, default=None,
+                        help="Checkpoint save interval in steps; default uses FMTrainConfig")
     parser.add_argument(
         "--train_mode",
         default="ir2red",
@@ -141,9 +145,13 @@ def main() -> None:
     cfg_model = FMModelConfig()
     cfg_train = FMTrainConfig()
     cfg_data  = DataConfig()
+    if args.save_every is not None:
+        cfg_train.save_every = args.save_every
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    print(f"Norm gain: {args.norm_gain}")
+    print(f"Save every: {cfg_train.save_every}")
 
     # ── Model ─────────────────────────────────────────────────────────────
     if args.train_mode == "bidirectional":
@@ -205,10 +213,12 @@ def main() -> None:
     train_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
         allowed_sets=train_sets,
+        norm_gain=args.norm_gain,
     )
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
         allowed_sets=val_sets,
+        norm_gain=args.norm_gain,
     )
 
     loader = get_loader(
@@ -244,6 +254,8 @@ def main() -> None:
                 "device":     str(device),
                 "train_mode": args.train_mode,
                 "model_tag":  model_tag,
+                "norm_gain":  args.norm_gain,
+                "save_every": cfg_train.save_every,
             },
             resume="allow",
         )

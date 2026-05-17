@@ -20,8 +20,8 @@ echo -e "Job started on $(date)\n"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
-DATA_ROOT=/scratch_root/ed425/HiRISE/
-CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
+DATA_ROOT=/scratch_root/as5023/HiRISE/data/
+CSV_PATH=/scratch_root/as5023/HiRISE/data/data_record_bin12.csv
 PRIOR_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
 
 # Evaluation mode switch:
@@ -31,7 +31,7 @@ case "$EVAL_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid EVAL_MODE: $EVAL_MODE"
-        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
+        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [no_dc|dc] [norm_gain]"
         exit 1
         ;;
 esac
@@ -40,18 +40,19 @@ esac
 #   sobel (default) | dexined
 EDGE_MODE=${2:-sobel}
 
-# DC offset mode (Method B): dc (default) | no_dc
-DC_MODE=${3:-dc}
+# DC offset mode (Method B): no_dc (default) | dc
+DC_MODE=${3:-no_dc}
+NORM_GAIN=${4:-1.0}
 case "$DC_MODE" in
     dc|no_dc) ;;
     *)
         echo "Invalid DC_MODE: $DC_MODE"
-        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        echo "Usage: sbatch eval_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [no_dc|dc] [norm_gain]"
         exit 1
         ;;
 esac
-DC_FLAG=""
-[ "$DC_MODE" = "no_dc" ] && DC_FLAG="--no_dc"
+DC_FLAG="--no_dc"
+[ "$DC_MODE" = "dc" ] && DC_FLAG="--use_dc"
 
 if [ "$EVAL_MODE" = "bidirectional" ]; then
     CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest_bidirectional.pt
@@ -74,6 +75,7 @@ echo "CSV path     : $CSV_PATH"
 echo "Eval mode    : $EVAL_MODE"
 echo "Edge mode    : $EDGE_MODE"
 echo "DC mode      : $DC_MODE"
+echo "Norm gain    : $NORM_GAIN"
 echo "Checkpoint   : $CHECKPOINT"
 echo "Prior dir    : $PRIOR_DIR"
 echo ""
@@ -94,6 +96,7 @@ for LAMBDA in 0.0 10.0 20.0 30.0 40.0 50.0 60.0 70.0 80.0 90.0 100.0; do
         --no_fid                     \
         --device       cuda          \
         --edge_mode    $EDGE_MODE    \
+        --norm_gain    $NORM_GAIN    \
         $DC_FLAG
 done
 end_time=$(date +%s)

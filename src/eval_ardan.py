@@ -69,7 +69,8 @@ def _build_inception(device):
 def _inception_features(images, inception):
     imgs = images.repeat(1, 3, 1, 1)
     imgs = F.interpolate(imgs, size=(299, 299), mode="bilinear", align_corners=False)
-    imgs = ((imgs + 10.0) / 20.0).clamp(0.0, 1.0)
+    norm_gain = float(getattr(_inception_features, "norm_gain", 1.0))
+    imgs = ((imgs + 10.0 * norm_gain) / (20.0 * norm_gain)).clamp(0.0, 1.0)
     return inception(imgs).cpu().numpy()
 
 
@@ -138,6 +139,7 @@ def evaluate_loop(
     per_image_rows = []
 
     if compute_fid:
+        _inception_features.norm_gain = float(getattr(dataset, "norm_gain", 1.0))
         inception = _build_inception(device)
         real_f0, fake_f0 = [], []
         real_f1, fake_f1 = [], []
@@ -161,21 +163,26 @@ def evaluate_loop(
                               prior_stats=prior_ir, cfg_inf=cfg_inf,
                               device=device, verbose=False)
 
-        pred_red_norm = pred_red.clamp(-10.0, 10.0)
-        pred_ir_norm  = pred_ir.clamp(-10.0, 10.0)
-
         # ── Denormalize → physical DN space ─────────────────────────────────
-        # norm_stats: [B, 3] = [center, scale, dc]
-        # x_raw = (x_norm + dc) * scale + center
+        # norm_stats: [B, 4] = [center, scale, dc, norm_gain]
+        # x_raw = (x_norm / norm_gain + dc) * scale + center
         ns     = batch["norm_stats"]
         center = ns[:, :1,  None, None].to(device)
         scale  = ns[:, 1:2, None, None].to(device)
         dc     = ns[:, 2:3, None, None].to(device)
+        norm_gain = (
+            ns[:, 3:4, None, None].to(device)
+            if ns.shape[1] > 3
+            else torch.ones_like(dc)
+        )
+        norm_limit = 10.0 * norm_gain
+        pred_red_norm = torch.maximum(torch.minimum(pred_red, norm_limit), -norm_limit)
+        pred_ir_norm  = torch.maximum(torch.minimum(pred_ir,  norm_limit), -norm_limit)
 
-        pred_red_phys = (pred_red_norm + dc) * scale + center
-        pred_ir_phys  = (pred_ir_norm  + dc) * scale + center
-        red_gt_phys   = (red_batch     + dc) * scale + center
-        ir_gt_phys    = (ir_batch      + dc) * scale + center
+        pred_red_phys = (pred_red_norm / norm_gain + dc) * scale + center
+        pred_ir_phys  = (pred_ir_norm  / norm_gain + dc) * scale + center
+        red_gt_phys   = (red_batch     / norm_gain + dc) * scale + center
+        ir_gt_phys    = (ir_batch      / norm_gain + dc) * scale + center
 
         n_done += B
 
@@ -296,6 +303,8 @@ def evaluate_loop(
     # ── Aggregate ─────────────────────────────────────────────────────────────
     avg = lambda lst: float(np.mean(lst))
 
+    norm_max_val = 20.0 * float(getattr(dataset, "norm_gain", 1.0))
+
     results = dict(
         n_samples=n_done,
         # Physical
@@ -315,13 +324,13 @@ def evaluate_loop(
         ssim_red2ir      = avg(ssim_1),
         # Normalized
         mse_norm_ir2red  = avg(mse_n0),
-        psnr_norm_ir2red = psnr_pooled(mse_n0, 20.0),
+        psnr_norm_ir2red = psnr_pooled(mse_n0, norm_max_val),
         nmae_norm_ir2red = avg(nmae_n0),
         pwt_norm_ir2red  = avg(pwt_n0),
         bias_norm_ir2red = avg(bias_n0),
         pearson_ir2red   = avg(pearson_0),
         mse_norm_red2ir  = avg(mse_n1),
-        psnr_norm_red2ir = psnr_pooled(mse_n1, 20.0),
+        psnr_norm_red2ir = psnr_pooled(mse_n1, norm_max_val),
         nmae_norm_red2ir = avg(nmae_n1),
         pwt_norm_red2ir  = avg(pwt_n1),
         bias_norm_red2ir = avg(bias_n1),
@@ -394,6 +403,8 @@ def evaluate_categories(
                 data_root=data_root,
                 sweep=True,
                 allowed_sets=cat_sets,
+                dc=args.use_dc,
+                norm_gain=args.norm_gain,
             )
         except ValueError as e:
             print(f"  WARNING: '{cat_name}' — {e}, skipping")
@@ -423,7 +434,7 @@ def evaluate_categories(
 # Reporting
 # =============================================================================
 
-def print_results_table(results, lambda_scl=0.0, lambda_ccl=0.0):
+def print_results_table(results, lambda_scl=0.0, lambda_ccl=0.0, norm_gain=1.0):
     """Print the full metric table to stdout."""
     W = 20
 
@@ -469,7 +480,8 @@ def print_results_table(results, lambda_scl=0.0, lambda_ccl=0.0):
 
     print(f"{'='*76}")
     print(f"n={results['n_samples']}  λ_scl={lambda_scl}  λ_ccl={lambda_ccl}")
-    print(f"Physical PSNR: MAX=1.0  |  Normalized PSNR: MAX=20 (clamp range [-10,10])")
+    print(f"Physical PSNR: MAX=1.0  |  Normalized PSNR uses MAX={20.0 * norm_gain:g} "
+          f"(clamp range [-{10.0 * norm_gain:g},{10.0 * norm_gain:g}])")
     print(f"NMAE%: 100×mean(|err|)/mean(|GT|)  |  PWT@1%: within 1% of GT range")
     print(f"Bias%: 100×mean(err)/mean(|GT|), signed (+→over-predict, -→under-predict)")
     print(f"SSIM: physical space, GT-normalized to [0,1] per image (via skimage)")
@@ -538,6 +550,13 @@ def main():
     parser.add_argument("--batch_size",   type=int,   default=4)
     parser.add_argument("--lambda_scl",   type=float, default=0.0)
     parser.add_argument("--lambda_ccl",   type=float, default=0.0)
+    parser.add_argument("--use_dc", dest="use_dc", action="store_true",
+                        help="Enable Method B dc subtraction for DDPM Ardan evaluation")
+    parser.add_argument("--no_dc", dest="use_dc", action="store_false",
+                        help="Disable Method B dc subtraction for DDPM Ardan evaluation")
+    parser.set_defaults(use_dc=False)
+    parser.add_argument("--norm_gain", type=float, default=1.0,
+                        help="Fixed gain applied after scene scaling")
     parser.add_argument("--no_fid",       action="store_true", default=True,
                         help="Skip FID computation (faster)")
     parser.add_argument("--seed",         type=int,   default=42)
@@ -555,6 +574,7 @@ def main():
     cfg_data  = DataConfig()
     cfg_inf   = DDPMInferenceConfig(lambda_scl=args.lambda_scl,
                                     lambda_ccl=args.lambda_ccl)
+    use_dc    = args.use_dc
     device    = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -596,10 +616,15 @@ def main():
     ).to(device)
 
     # ── Priors ────────────────────────────────────────────────────────────────
-    prior_red = load_prior_stats(os.path.join(args.prior_dir, "prior_red.pt"), device)
-    prior_ir  = load_prior_stats(os.path.join(args.prior_dir, "prior_ir.pt"),  device)
-    print(f"Prior RED : mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
-    print(f"Prior IR  : mu={prior_ir['mu'].item():.4f}   sigma={prior_ir['sigma'].item():.4f}")
+    prior_suffix = "_dc" if use_dc else ""
+    if args.norm_gain != 1.0:
+        prior_suffix = f"{prior_suffix}_g{args.norm_gain:g}"
+    prior_red_name = f"prior_red{prior_suffix}.pt"
+    prior_ir_name  = f"prior_ir{prior_suffix}.pt"
+    prior_red = load_prior_stats(os.path.join(args.prior_dir, prior_red_name), device)
+    prior_ir  = load_prior_stats(os.path.join(args.prior_dir, prior_ir_name),  device)
+    print(f"Prior RED ({prior_red_name}): mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
+    print(f"Prior IR  ({prior_ir_name}) : mu={prior_ir['mu'].item():.4f}   sigma={prior_ir['sigma'].item():.4f}")
 
     # ── Dataset ───────────────────────────────────────────────────────────────
     dr = pd.read_csv(csv_path)
@@ -607,6 +632,7 @@ def main():
 
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True, allowed_sets=val_sets,
+        dc=use_dc, norm_gain=args.norm_gain,
     )
     print(f"Val set      : {len(val_dataset)} images\n")
 
@@ -622,7 +648,7 @@ def main():
         compute_fid=not args.no_fid,
     )
 
-    print_results_table(results, args.lambda_scl, args.lambda_ccl)
+    print_results_table(results, args.lambda_scl, args.lambda_ccl, args.norm_gain)
 
     # ── Export per-image CSV ──────────────────────────────────────────────────
     run_label = f"lscl{args.lambda_scl}_lccl{args.lambda_ccl}"

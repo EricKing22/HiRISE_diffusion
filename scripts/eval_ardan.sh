@@ -20,8 +20,8 @@ echo -e "Job started on $(date)\n"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
-DATA_ROOT=/scratch_root/ed425/HiRISE/
-CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
+DATA_ROOT=/scratch_root/as5023/HiRISE/data/
+CSV_PATH=/scratch_root/as5023/HiRISE/data/data_record_bin12.csv
 CHECKPOINT=/scratch_root/ed425/HiRISE_diffusion/src/output/latest.pt
 PRIOR_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
 EVALS_CONFIG=/scratch_root/ed425/HiRISE_diffusion/src/configs/evals_ardan.yaml

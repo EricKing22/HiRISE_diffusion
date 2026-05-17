@@ -169,12 +169,13 @@ def evaluate_fm_unidirectional(
 def _eval_one_direction_fm(
     model, cfg_inf,
     src, tgt,
-    center, scale, dc,
+    center, scale, dc, norm_gain,
     device,
     compute_fid, inception,
     label,
     direction=None,
     prior_stats=None,
+    collect_sgi_diagnostics=False,
 ):
     """
     Full FM Euler ODE sampling for one (src→tgt) direction.
@@ -184,18 +185,29 @@ def _eval_one_direction_fm(
     """
     B = src.shape[0]
 
-    with torch.no_grad():
-        pred = sample_fm(
+    if collect_sgi_diagnostics:
+        pred, sgi_diagnostics = sample_fm(
             model, src, cfg_inf, device,
             direction=direction,
             prior_stats=prior_stats,
             verbose=False,
+            return_diagnostics=True,
         )
+    else:
+        with torch.no_grad():
+            pred = sample_fm(
+                model, src, cfg_inf, device,
+                direction=direction,
+                prior_stats=prior_stats,
+                verbose=False,
+            )
+        sgi_diagnostics = []
 
     pred_raw  = pred
-    pred_norm = pred_raw.clamp(-10.0, 10.0)
-    pred_phys = (pred_norm + dc) * scale + center
-    tgt_phys  = (tgt       + dc) * scale + center
+    norm_limit = 10.0 * norm_gain
+    pred_norm = torch.maximum(torch.minimum(pred_raw, norm_limit), -norm_limit)
+    pred_phys = (pred_norm / norm_gain + dc) * scale + center
+    tgt_phys  = (tgt       / norm_gain + dc) * scale + center
 
     mse_phys_b = F.mse_loss(pred_phys, tgt_phys, reduction="none").mean(dim=[1, 2, 3])
     mae_phys_b = F.l1_loss( pred_phys, tgt_phys, reduction="none").mean(dim=[1, 2, 3])
@@ -205,9 +217,10 @@ def _eval_one_direction_fm(
     rel_mae_b = mae_phys_b / target_range_b
     rel_rmse_b = torch.sqrt(mse_phys_b.clamp_min(0.0)) / target_range_b
     scale_b = scale.flatten()
-    src_clip_b = (src.abs() >= 9.999).float().mean(dim=[1, 2, 3])
-    tgt_clip_b = (tgt.abs() >= 9.999).float().mean(dim=[1, 2, 3])
-    pred_clip_b = (pred_raw.abs() >= 9.999).float().mean(dim=[1, 2, 3])
+    clip_limit = norm_limit - 1e-3
+    src_clip_b = (src.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
+    tgt_clip_b = (tgt.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
+    pred_clip_b = (pred_raw.abs() >= clip_limit).float().mean(dim=[1, 2, 3])
 
     ssim_phy_vals, ssim_norm_vals = [], []
     for i in range(B):
@@ -218,7 +231,7 @@ def _eval_one_direction_fm(
         ssim_norm_vals.append(_ssim_safe(
             tgt[i].squeeze().cpu().numpy(),
             pred_norm[i].squeeze().cpu().numpy(),
-            data_range=20.0))
+            data_range=float(20.0 * norm_gain[i].flatten()[0].item())))
 
     with torch.no_grad():
         pearson_b = _pearson_batch(pred_norm, tgt)
@@ -240,9 +253,38 @@ def _eval_one_direction_fm(
         pearson   = pearson_b.cpu().tolist(),
         fid_real  = _inception_features(tgt,       inception) if compute_fid else None,
         fid_fake  = _inception_features(pred_norm, inception) if compute_fid else None,
+        sgi_diagnostics = sgi_diagnostics,
         progress  = (f"MSE({label})={mse_phys_b.mean():.4f}/{mse_norm_b.mean():.4f}  "
                      f"SSIM phy={np.mean(ssim_phy_vals):.4f} norm={np.mean(ssim_norm_vals):.4f}"),
     )
+
+
+def _summarize_sgi_diagnostics(records: list[dict]) -> dict:
+    if not records:
+        return {}
+    keys = [
+        "v_norm", "grad_norm", "guided_norm", "guided_to_v", "cosine",
+        "loss_scl", "loss_ccl", "x1_mean", "x1_sigma", "prior_mean", "prior_sigma",
+    ]
+    summary = {}
+    for key in keys:
+        vals = np.asarray([r[key] for r in records], dtype=np.float64)
+        summary[f"{key}_mean"] = float(np.mean(vals))
+        summary[f"{key}_p50"] = float(np.percentile(vals, 50))
+        summary[f"{key}_p95"] = float(np.percentile(vals, 95))
+
+    # Coarser early/mid/late bins make it easier to see if guidance only becomes
+    # active near the clean end of the ODE.
+    for name, lo, hi in (("early", 0.0, 0.34), ("mid", 0.34, 0.67), ("late", 0.67, 1.01)):
+        group = [r for r in records if lo <= r["t"] < hi]
+        if not group:
+            continue
+        summary[f"{name}_guided_to_v"] = float(np.mean([r["guided_to_v"] for r in group]))
+        summary[f"{name}_cosine"] = float(np.mean([r["cosine"] for r in group]))
+        summary[f"{name}_x1_mean"] = float(np.mean([r["x1_mean"] for r in group]))
+        summary[f"{name}_x1_sigma"] = float(np.mean([r["x1_sigma"] for r in group]))
+    summary["n_records"] = len(records)
+    return summary
 
 
 def evaluate_images_fm(
@@ -258,6 +300,7 @@ def evaluate_images_fm(
     prior_red:      dict | None = None,
     prior_ir:       dict | None = None,
     show_progress:  bool = False,
+    collect_sgi_diagnostics: bool = False,
 ) -> dict:
     """
     Image-level evaluation: full Euler ODE sampling in batches.
@@ -285,7 +328,7 @@ def evaluate_images_fm(
                               "target_range", "rel_mae", "rel_rmse", "scale",
                               "src_clip", "tgt_clip", "pred_clip",
                               "ssim_norm", "ssim_phys", "pearson",
-                              "fid_real",  "fid_fake")}
+                              "fid_real",  "fid_fake", "sgi_diagnostics")}
             for _ in range(2)]
 
     inception = _build_inception(device) if compute_fid else None
@@ -305,8 +348,14 @@ def evaluate_images_fm(
         center = norm_stats[:, :1, None, None].to(device)
         scale  = norm_stats[:, 1:2, None, None].to(device)
         dc     = norm_stats[:, 2:3, None, None].to(device)
+        norm_gain = (
+            norm_stats[:, 3:4, None, None].to(device)
+            if norm_stats.shape[1] > 3
+            else torch.ones_like(dc)
+        )
 
         shared = dict(cfg_inf=cfg_inf, center=center, scale=scale, dc=dc,
+                      norm_gain=norm_gain,
                       device=device, compute_fid=compute_fid, inception=inception)
 
         progress_parts = [f"  [{n_done + B}/{n}]"] if show_progress else None
@@ -322,6 +371,7 @@ def evaluate_images_fm(
             m = _eval_one_direction_fm(
                 model, src=src, tgt=tgt, label=label,
                 direction=direction, prior_stats=prior_stats, **shared,
+                collect_sgi_diagnostics=collect_sgi_diagnostics,
             )
             for k in ("mse_phys", "mae_phys", "mse_norm", "mae_norm",
                       "target_range", "rel_mae", "rel_rmse", "scale",
@@ -331,6 +381,8 @@ def evaluate_images_fm(
             if compute_fid:
                 accs[dir_idx]["fid_real"].append(m["fid_real"])
                 accs[dir_idx]["fid_fake"].append(m["fid_fake"])
+            if collect_sgi_diagnostics:
+                accs[dir_idx]["sgi_diagnostics"].extend(m["sgi_diagnostics"])
             if show_progress:
                 progress_parts.append(m["progress"])
 
@@ -349,6 +401,7 @@ def evaluate_images_fm(
         return float(np.percentile(lst, q)) if lst else float("nan")
 
     a0, a1 = accs[0], accs[1]
+    norm_max_val = 20.0 * float(getattr(val_dataset, "norm_gain", 1.0))
     results = dict(
         n_samples        = n_done,
         # Physical space
@@ -361,11 +414,11 @@ def evaluate_images_fm(
         # Normalized space
         mse_norm_ir2red  = _avg(a0["mse_norm"]),
         mae_norm_ir2red  = _avg(a0["mae_norm"]),
-        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], 20.0),
+        psnr_norm_ir2red = _psnr_pooled(a0["mse_norm"], norm_max_val),
         ssim_norm_ir2red = _avg(a0["ssim_norm"]),
         mse_norm_red2ir  = _avg(a1["mse_norm"]),
         mae_norm_red2ir  = _avg(a1["mae_norm"]),
-        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], 20.0),
+        psnr_norm_red2ir = _psnr_pooled(a1["mse_norm"], norm_max_val),
         ssim_norm_red2ir = _avg(a1["ssim_norm"]),
         # Statistical
         pearson_ir2red   = _avg(a0["pearson"]),
@@ -405,6 +458,12 @@ def evaluate_images_fm(
         if fid_parts:
             print(f"  {'  '.join(fid_parts)}")
 
+    if collect_sgi_diagnostics:
+        for prefix, a in (("sgi_diag_ir2red", a0), ("sgi_diag_red2ir", a1)):
+            summary = _summarize_sgi_diagnostics(a["sgi_diagnostics"])
+            for key, value in summary.items():
+                results[f"{prefix}_{key}"] = value
+
     return results
 
 
@@ -438,12 +497,22 @@ def main() -> None:
     parser.add_argument("--sgi_schedule_power", type=float, default=2.0)
     parser.add_argument("--sgi_mode", choices=["velocity", "reproject"], default="velocity",
                         help="SGI update mode: velocity correction or PnP-style re-interpolation")
+    parser.add_argument("--sgi_scale_mode", choices=["ratio", "raw"], default="ratio",
+                        help="SGI scaling: ratio controls correction RMS relative to velocity; raw uses lambda_t * grad")
+    parser.add_argument("--sgi_guidance_ratio", type=float, default=0.01,
+                        help="Target RMS correction / RMS velocity when --sgi_scale_mode=ratio")
     parser.add_argument("--no_fid",      default=True, action="store_true",
                         help="Skip FID computation (faster)")
     parser.add_argument("--show_progress", action="store_true",
                         help="Print per-batch image metrics during evaluation")
+    parser.add_argument("--sgi_diagnostics", action="store_true",
+                        help="Collect SGI gradient/velocity diagnostics during FM sampling")
+    parser.add_argument("--sgi_diagnostic_every", type=int, default=5,
+                        help="Collect SGI diagnostics every N Euler steps")
     parser.add_argument("--no_dc", action="store_true",
                         help="Disable DiffusionDataset dc subtraction; also selects non-DC priors")
+    parser.add_argument("--norm_gain", type=float, default=4.0,
+                        help="Fixed gain applied after DC-normalized scene scaling")
     parser.add_argument("--seed",        type=int, default=42)
     parser.add_argument("--device",      default="cuda")
     parser.add_argument(
@@ -465,6 +534,10 @@ def main() -> None:
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
             sgi_mode=args.sgi_mode,
+            sgi_scale_mode=args.sgi_scale_mode,
+            sgi_guidance_ratio=args.sgi_guidance_ratio,
+            sgi_diagnostics=args.sgi_diagnostics,
+            sgi_diagnostic_every=args.sgi_diagnostic_every,
         )
     else:
         cfg_inf = FMInferenceConfig(
@@ -472,6 +545,10 @@ def main() -> None:
             lambda_sgi_ccl=args.lambda_sgi_ccl,
             sgi_schedule_power=args.sgi_schedule_power,
             sgi_mode=args.sgi_mode,
+            sgi_scale_mode=args.sgi_scale_mode,
+            sgi_guidance_ratio=args.sgi_guidance_ratio,
+            sgi_diagnostics=args.sgi_diagnostics,
+            sgi_diagnostic_every=args.sgi_diagnostic_every,
         )
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
@@ -486,11 +563,15 @@ def main() -> None:
     print(f"ODE steps    : {cfg_inf.num_steps}")
     print(f"SGI          : lambda_scl={cfg_inf.lambda_sgi_scl}  "
           f"lambda_ccl={cfg_inf.lambda_sgi_ccl}  power={cfg_inf.sgi_schedule_power}  "
-          f"mode={cfg_inf.sgi_mode}")
+          f"mode={cfg_inf.sgi_mode}  scale={cfg_inf.sgi_scale_mode}  "
+          f"guidance_ratio={cfg_inf.sgi_guidance_ratio}")
     print(f"Max samples  : {args.max_samples if args.max_samples > 0 else 'all'}")
     print(f"FID          : {'disabled' if args.no_fid else 'enabled'}")
     print(f"Progress     : {'shown' if args.show_progress else 'hidden'}")
+    print(f"SGI diag     : {'enabled' if args.sgi_diagnostics else 'disabled'}"
+          f"{f' every {args.sgi_diagnostic_every} steps' if args.sgi_diagnostics else ''}")
     print(f"DC norm      : {'enabled' if use_dc else 'disabled'}")
+    print(f"Norm gain    : {args.norm_gain}")
     print()
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -517,13 +598,15 @@ def main() -> None:
 
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets, dc=use_dc,
+        allowed_sets=val_sets, dc=use_dc, norm_gain=args.norm_gain,
     )
     print(f"Val set: {len(val_dataset)} sets\n")
 
     prior_red = prior_ir = None
     if cfg_inf.lambda_sgi_scl > 0.0 or cfg_inf.lambda_sgi_ccl > 0.0:
         prior_suffix = "_dc" if use_dc else ""
+        if args.norm_gain != 1.0:
+            prior_suffix = f"{prior_suffix}_g{args.norm_gain:g}"
         prior_red_name = f"prior_red{prior_suffix}.pt"
         prior_ir_name  = f"prior_ir{prior_suffix}.pt"
         prior_red = load_prior_stats(os.path.join(args.prior_dir, prior_red_name), device)
@@ -543,6 +626,7 @@ def main() -> None:
         prior_red=prior_red,
         prior_ir=prior_ir,
         show_progress=args.show_progress,
+        collect_sgi_diagnostics=args.sgi_diagnostics,
     )
 
     # ── Print results table (same format as eval_ddpm.py) ─────────────────────
@@ -597,9 +681,44 @@ def main() -> None:
     print(f"{'  tgt clamp':<{W}}  {_pct(results['tgt_clip_ir2red'])}  {_pct(results['tgt_clip_red2ir'])}  {'—':>10}")
     print(f"{'  pred clamp':<{W}}  {_pct(results['pred_clip_ir2red'])}  {_pct(results['pred_clip_red2ir'])}  {'—':>10}")
     print(f"{'='*68}")
+    if args.sgi_diagnostics:
+        print(f"{'[SGI diag]':<{W}}  {'IR→RED':>10}  {'RED→IR':>10}  {'Combined':>10}")
+        diag_rows = [
+            ("records", "n_records", _f2),
+            ("||v||", "v_norm_mean", _f6),
+            ("||grad||", "grad_norm_mean", _f6),
+            ("||guide||", "guided_norm_mean", _f6),
+            ("||guide||/||v||", "guided_to_v_mean", _f6),
+            ("cos(v,-g)", "cosine_mean", _f4),
+            ("L_scl", "loss_scl_mean", _f6),
+            ("L_ccl", "loss_ccl_mean", _f6),
+            ("x1 mean", "x1_mean_mean", _f6),
+            ("x1 sigma", "x1_sigma_mean", _f6),
+            ("prior mean", "prior_mean_mean", _f6),
+            ("prior sigma", "prior_sigma_mean", _f6),
+            ("early ratio", "early_guided_to_v", _f6),
+            ("mid ratio", "mid_guided_to_v", _f6),
+            ("late ratio", "late_guided_to_v", _f6),
+            ("early cosine", "early_cosine", _f4),
+            ("mid cosine", "mid_cosine", _f4),
+            ("late cosine", "late_cosine", _f4),
+        ]
+        for label, key, fmt in diag_rows:
+            k0 = f"sgi_diag_ir2red_{key}"
+            k1 = f"sgi_diag_red2ir_{key}"
+            v0 = results.get(k0, float("nan"))
+            v1 = results.get(k1, float("nan"))
+            if key == "n_records":
+                comb = (v0 + v1) if not (math.isnan(v0) or math.isnan(v1)) else float("nan")
+                print(f"{'  ' + label:<{W}}  {_f2(v0)}  {_f2(v1)}  {_f2(comb)}")
+            else:
+                print(f"{'  ' + label:<{W}}  {fmt(v0)}  {fmt(v1)}  {_avg2(v0, v1)}")
+        print(f"{'='*68}")
     print(f"(n={results['n_samples']}  mode={args.train_mode}  steps={cfg_inf.num_steps}  "
-          f"λ_sgi_scl={cfg_inf.lambda_sgi_scl}  λ_sgi_ccl={cfg_inf.lambda_sgi_ccl})")
-    print(f"  PSNR (normalized, MAX=20) ≡ PSNR (physical, MAX=1.0) under scale=0.05 normalisation")
+          f"λ_sgi_scl={cfg_inf.lambda_sgi_scl}  λ_sgi_ccl={cfg_inf.lambda_sgi_ccl}  "
+          f"sgi_scale={cfg_inf.sgi_scale_mode}  guidance_ratio={cfg_inf.sgi_guidance_ratio})")
+    print(f"  PSNR (normalized, MAX={20.0 * args.norm_gain:g}) uses clamp range "
+          f"[-{10.0 * args.norm_gain:g},{10.0 * args.norm_gain:g}]")
     print(f"  SSIM physical: per-image GT dynamic range, floor=0.01")
     print(f"  Diagnostics: range is physical target max-min; relative errors divide by that range.")
 

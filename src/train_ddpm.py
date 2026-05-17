@@ -172,16 +172,28 @@ def main() -> None:
                         help="Edge detector: sobel (default) or dexined")
     parser.add_argument("--dexined_weights", default="checkpoints/dexined_biped.pth",
                         help="Path to DexiNed pretrained weights (.pth)")
-    parser.add_argument("--no_dc", action="store_true",
-                        help="Disable Method B dc subtraction (IR mean kept non-zero)")
+    parser.add_argument("--use_dc", dest="use_dc", action="store_true",
+                        help="Enable Method B dc subtraction for DDPM")
+    parser.add_argument("--no_dc", dest="use_dc", action="store_false",
+                        help="Disable Method B dc subtraction for DDPM")
+    parser.set_defaults(use_dc=False)
+    parser.add_argument("--norm_gain", type=float, default=1.0,
+                        help="Fixed gain applied after scene scaling")
+    parser.add_argument("--save_every", type=int, default=None,
+                        help="Checkpoint save interval in steps; default uses DDPMTrainConfig")
     args = parser.parse_args()
 
     cfg_model = DDPMModelConfig()
     cfg_train = DDPMTrainConfig()
     cfg_data  = DataConfig()
+    if args.save_every is not None:
+        cfg_train.save_every = args.save_every
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
+    print(f"DC norm: {'enabled' if args.use_dc else 'disabled'}")
+    print(f"Norm gain: {args.norm_gain}")
+    print(f"Save every: {cfg_train.save_every}")
 
     # ── Diffusion schedule ────────────────────────────────────────────────
     scheduler = DDPMScheduler(
@@ -248,14 +260,13 @@ def main() -> None:
     train_obs = dr[dr["Set"].isin(train_sets)]["Observation"].unique()
     val_obs   = dr[dr["Set"].isin(val_sets)]["Observation"].unique()
 
-    use_dc = not args.no_dc
     train_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=train_sets, dc=use_dc,
+        allowed_sets=train_sets, dc=args.use_dc, norm_gain=args.norm_gain,
     )
     val_dataset = DiffusionDataset(
         data_record=dr, data_root=data_root, sweep=True,
-        allowed_sets=val_sets, dc=use_dc,
+        allowed_sets=val_sets, dc=args.use_dc, norm_gain=args.norm_gain,
     )
 
     loader = get_loader(
@@ -292,6 +303,9 @@ def main() -> None:
                 "train_mode": args.train_mode,
                 "model_tag": model_tag,
                 "edge_mode": args.edge_mode,
+                "dc": args.use_dc,
+                "norm_gain": args.norm_gain,
+                "save_every": cfg_train.save_every,
             },
             resume="allow",
         )

@@ -33,8 +33,8 @@ echo -e "Job started on $(date)\n"
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 PROJECT_ROOT=/scratch_root/ed425/HiRISE_diffusion
-DATA_ROOT=/scratch_root/ed425/HiRISE/
-CSV_PATH=/scratch_root/ed425/HiRISE/files/data_record_bin12.csv
+DATA_ROOT=/scratch_root/as5023/HiRISE/data/
+CSV_PATH=/scratch_root/as5023/HiRISE/data/data_record_bin12.csv
 CKPT_DIR=/scratch_root/ed425/HiRISE_diffusion/src/output
 
 mkdir -p /scratch_root/ed425/HiRISE_diffusion/scripts/logs
@@ -53,7 +53,7 @@ case "$TRAIN_MODE" in
     bidirectional|ir2red|red2ir) ;;
     *)
         echo "Invalid TRAIN_MODE: $TRAIN_MODE"
-        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined]"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [no_dc|dc] [norm_gain] [save_every]"
         exit 1
         ;;
 esac
@@ -65,26 +65,28 @@ case "$EDGE_MODE" in
     sobel|dexined) ;;
     *)
         echo "Invalid EDGE_MODE: $EDGE_MODE"
-        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [no_dc|dc] [norm_gain] [save_every]"
         exit 1
         ;;
 esac
 
-# DC offset mode (Method B): dc (default) | no_dc
-DC_MODE=${3:-dc}
+# DC offset mode (Method B): no_dc (default) | dc
+DC_MODE=${3:-no_dc}
+NORM_GAIN=${4:-1.0}
+SAVE_EVERY=${5:-100000}
 case "$DC_MODE" in
     dc|no_dc) ;;
     *)
         echo "Invalid DC_MODE: $DC_MODE"
-        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [dc|no_dc]"
+        echo "Usage: sbatch train_ddpm.sh [bidirectional|ir2red|red2ir] [sobel|dexined] [no_dc|dc] [norm_gain] [save_every]"
         exit 1
         ;;
 esac
-DC_FLAG=""
-[ "$DC_MODE" = "no_dc" ] && DC_FLAG="--no_dc"
+DC_FLAG="--no_dc"
+[ "$DC_MODE" = "dc" ] && DC_FLAG="--use_dc"
 
 LATEST_CKPT=${CKPT_DIR}/latest_${TRAIN_MODE}.pt
-RUN_CKPT_PATTERN=${CKPT_DIR}/${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt
+RUN_CKPT_PATTERN="${CKPT_DIR}/${TRAIN_MODE}_<mmdd_HHMM>/step_XXXXXXX.pt"
 
 echo "Checkpoint dir          : $CKPT_DIR"
 echo "Latest checkpoint file  : $LATEST_CKPT"
@@ -92,6 +94,8 @@ echo "Step checkpoint pattern : $RUN_CKPT_PATTERN"
 echo "Train mode   : $TRAIN_MODE"
 echo "Edge mode    : $EDGE_MODE"
 echo "DC mode      : $DC_MODE"
+echo "Norm gain    : $NORM_GAIN"
+echo "Save every   : $SAVE_EVERY steps"
 echo ""
 
 if [ "$TRAIN_MODE" = "bidirectional" ]; then
@@ -110,6 +114,8 @@ python src/train_ddpm.py \
     --run_name      "${TRAIN_MODE}_${EDGE_MODE}_${DC_MODE}_slurm_${SLURM_JOB_ID}" \
     --train_mode    $TRAIN_MODE       \
     --edge_mode     $EDGE_MODE        \
+    --norm_gain     $NORM_GAIN        \
+    --save_every    $SAVE_EVERY       \
     $DC_FLAG
 
 end_time=$(date +%s)

@@ -161,6 +161,8 @@ def compute_prior_from_dataset(
     bins:      int = 256,
     data_root: str = "",
     csv_path:  str = "",
+    dc:        bool = True,
+    norm_gain: float = 4.0,
 ) -> tuple:
     """
     Load the dataset, collect all IR10 and RED4 pixels, compute prior stats,
@@ -177,21 +179,12 @@ def compute_prior_from_dataset(
     print(f"[prior] Loading dataset from {csv_path} ...")
     dr = pd.read_csv(csv_path)
 
-    def _exists(rel_path):
-        p = os.path.join(data_root, rel_path)
-        if os.name == "nt":
-            p = p.replace("/", "\\")
-        return os.path.isfile(p)
+    print(f"[prior] {dr['Observation'].nunique()} observations in CSV — building prior ...")
 
-    dr = dr[dr["Path"].apply(_exists)]
-    if dr.empty:
-        raise FileNotFoundError(
-            f"No .npy files found under data_root='{data_root}'. "
-            "Pass --data_root pointing to the directory that contains the CSV paths."
-        )
-    print(f"[prior] {dr['Observation'].nunique()} observations available — building prior ...")
-
-    dataset = DiffusionDataset(data_record=dr, data_root=data_root, sweep=True, dc=True)
+    dataset = DiffusionDataset(
+        data_record=dr, data_root=data_root, sweep=True,
+        dc=dc, norm_gain=norm_gain,
+    )
     print(f"[prior] {len(dataset)} sets — collecting pixels ...")
 
     def _iter_modality(key):
@@ -201,8 +194,11 @@ def compute_prior_from_dataset(
     prior_ir  = compute_prior_stats(_iter_modality("ir"),  bins=bins, device=device)
     prior_red = compute_prior_stats(_iter_modality("red"), bins=bins, device=device)
 
-    save_prior_stats(prior_ir,  os.path.join(prior_dir, "prior_ir.pt"))
-    save_prior_stats(prior_red, os.path.join(prior_dir, "prior_red.pt"))
+    suffix = "_dc" if dc else ""
+    if norm_gain != 1.0:
+        suffix = f"{suffix}_g{norm_gain:g}"
+    save_prior_stats(prior_ir,  os.path.join(prior_dir, f"prior_ir{suffix}.pt"))
+    save_prior_stats(prior_red, os.path.join(prior_dir, f"prior_red{suffix}.pt"))
 
     return prior_ir, prior_red
 
@@ -223,6 +219,8 @@ def main() -> None:
     parser.add_argument("--device",    default="cpu")
     parser.add_argument("--no_dc", action="store_true",
                         help="Disable Method B dc subtraction (must match training setting)")
+    parser.add_argument("--norm_gain", type=float, default=4.0,
+                        help="Fixed gain applied after DC-normalized scene scaling")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -233,27 +231,25 @@ def main() -> None:
     print(f"Prior dir    : {args.prior_dir}")
     print(f"Bins         : {args.bins}")
     print(f"Device       : {device}")
+    print(f"DC norm      : {'disabled' if args.no_dc else 'enabled'}")
+    print(f"Norm gain    : {args.norm_gain}")
     print()
 
     dr = pd.read_csv(args.csv_path)
 
-    def _exists(rel):
-        p = os.path.join(args.data_root, rel)
-        if os.name == "nt":
-            p = p.replace("/", "\\")
-        return os.path.isfile(p)
-
     before = dr["Observation"].nunique()
-    dr     = dr[dr["Path"].apply(_exists)]
-    after  = dr["Observation"].nunique()
-    print(f"Observations : {after} / {before} available")
+    print(f"Observations : {before} in CSV")
 
     if dr.empty:
         raise FileNotFoundError(
-            f"No .npy files found under data_root='{args.data_root}'."
+            f"No rows found in csv_path='{args.csv_path}'."
         )
 
-    dataset = DiffusionDataset(data_record=dr, data_root=args.data_root, sweep=True, dc=not args.no_dc)
+    use_dc = not args.no_dc
+    dataset = DiffusionDataset(
+        data_record=dr, data_root=args.data_root, sweep=True,
+        dc=use_dc, norm_gain=args.norm_gain,
+    )
     n = len(dataset)
     print(f"Dataset sets : {n}")
     print("Collecting pixels ...")
@@ -267,12 +263,15 @@ def main() -> None:
 
     print("Computing IR10 prior ...")
     prior_ir = compute_prior_stats(_iter_modality("ir"), bins=args.bins, device=device)
-    save_prior_stats(prior_ir, os.path.join(args.prior_dir, "prior_ir.pt"))
+    suffix = "_dc" if use_dc else ""
+    if args.norm_gain != 1.0:
+        suffix = f"{suffix}_g{args.norm_gain:g}"
+    save_prior_stats(prior_ir, os.path.join(args.prior_dir, f"prior_ir{suffix}.pt"))
     print(f"  mu={prior_ir['mu'].item():.4f}  sigma={prior_ir['sigma'].item():.4f}")
 
     print("Computing RED4 prior ...")
     prior_red = compute_prior_stats(_iter_modality("red"), bins=args.bins, device=device)
-    save_prior_stats(prior_red, os.path.join(args.prior_dir, "prior_red.pt"))
+    save_prior_stats(prior_red, os.path.join(args.prior_dir, f"prior_red{suffix}.pt"))
     print(f"  mu={prior_red['mu'].item():.4f}  sigma={prior_red['sigma'].item():.4f}")
 
     print("\nDone.")
